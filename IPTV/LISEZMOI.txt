@@ -1,0 +1,16 @@
+APPLI IPTV (Android TV / Google TV) - Xtream - version 2 (nouvelle interface)
+
+Nouveautes : barre en pilule TV / Guide / Films / Series, grande banniere du film en cours,
+rangees par genre (Recemment ajoutes, Action...), guide des programmes, recherche.
+
+1) Android Studio : File > Open > dossier IPTV, attendre la synchro Gradle.
+2) Build > Build APK(s) -> app/build/outputs/apk/debug/app-debug.apk
+3) TCL : Parametres > Systeme > A propos > 7 clics sur "Build", autoriser les sources inconnues.
+4) Copie l'APK sur la TV (cle USB / Send Files to TV) et installe-le PAR-DESSUS l'ancienne version
+   (ou : adb install -r app-debug.apk). Tes identifiants Xtream restent memorises.
+
+MISES A JOUR
+L'APK est signe avec une cle fixe (app/debug.keystore) : chaque nouvelle version s'installe
+par-dessus l'ancienne sans rien perdre. Garde le depot GitHub en PRIVE.
+Pour mettre a jour : remplace les fichiers modifies dans le depot GitHub -> l'APK se refait
+tout seul (onglet Actions) -> telecharge-le -> installe-le sur la TV.

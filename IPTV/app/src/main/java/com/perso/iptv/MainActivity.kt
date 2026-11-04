@@ -76,9 +76,28 @@ private fun clock(): String = SimpleDateFormat("HH:mm", Locale.getDefault()).for
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val sp = getSharedPreferences("crash", Context.MODE_PRIVATE)
+        val last = sp.getString("trace", null)
+        val old = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            sp.edit().putString("trace", e.stackTraceToString().take(1800)).commit()
+            old?.uncaughtException(t, e)
+        }
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = ACCENT)) {
-                Surface(Modifier.fillMaxSize(), color = BG) { App() }
+                Surface(Modifier.fillMaxSize(), color = BG) {
+                    var crash by remember { mutableStateOf(last) }
+                    val c = crash
+                    if (c != null) {
+                        Column(Modifier.fillMaxSize().padding(32.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Text("L'appli a planté. Prends cet écran en photo :", color = TXT)
+                            Text(c, fontSize = 11.sp, color = MUTED)
+                            Button(onClick = { sp.edit().remove("trace").apply(); crash = null }) { Text("Continuer") }
+                        }
+                    } else {
+                        App()
+                    }
+                }
             }
         }
     }
@@ -153,8 +172,10 @@ fun Home(api: Xtream, logout: () -> Unit) {
             try {
                 val d = withContext(Dispatchers.IO) { buildData(api.cats(kind), api.items(kind)) }
                 cache[kind] = d
-            } catch (e: Exception) {
-                error = "Erreur : ${e.message}"
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                error = "Erreur : ${e.javaClass.simpleName} ${e.message ?: ""}"
             }
         }
     }
@@ -357,7 +378,7 @@ fun Browse(
                     contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    items(shelf.items, key = { it.id }) { it ->
+                    items(shelf.items) { it ->
                         Poster(it, if (live) 1f else 2f / 3f, live, onFocus) { onOpen(it) }
                     }
                 }
@@ -410,7 +431,7 @@ fun SearchView(all: List<Item>, live: Boolean, query: String, onQuery: (String) 
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            items(res, key = { it.id }) { it ->
+            items(res) { it ->
                 Poster(it, if (live) 1f else 2f / 3f, live, {}) { onOpen(it) }
             }
         }
@@ -427,7 +448,7 @@ fun GuideView(api: Xtream, data: Data, onPlay: (Item) -> Unit) {
         }
         Spacer(Modifier.height(10.dp))
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 32.dp)) {
-            items(list, key = { it.id }) { ch -> GuideRow(api, ch) { onPlay(ch) } }
+            items(list) { ch -> GuideRow(api, ch) { onPlay(ch) } }
         }
     }
 }

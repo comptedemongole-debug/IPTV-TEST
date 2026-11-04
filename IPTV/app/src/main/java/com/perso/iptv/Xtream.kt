@@ -1,6 +1,9 @@
 package com.perso.iptv
 
 import android.util.Base64
+import android.util.JsonReader
+import android.util.JsonToken
+import java.io.InputStreamReader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -50,24 +53,66 @@ class Xtream(server: String, private val user: String, private val pass: String)
     suspend fun items(kind: String): List<Item> = withContext(Dispatchers.IO) {
         val series = kind == "series"
         val act = if (series) "get_series" else "get_${kind}_streams"
-        val a = JSONArray(call("action=$act"))
-        (0 until a.length()).map {
-            val o = a.getJSONObject(it)
-            val img = if (series) o.str("cover") else o.str("stream_icon")
-            Item(
-                id = o.str(if (series) "series_id" else "stream_id"),
-                name = o.str("name"),
-                img = img.ifBlank { null },
-                cat = o.str("category_id"),
-                ext = o.str("container_extension").ifBlank { "mp4" },
-                added = o.str("added").toLongOrNull() ?: o.str("last_modified").toLongOrNull() ?: 0,
-                rating = o.str("rating"),
-                plot = o.str("plot"),
-                year = o.str("year").ifBlank { o.str("releaseDate").ifBlank { o.str("release_date") } }.take(4),
-                genre = o.str("genre"),
-                backdrop = o.firstOf("backdrop_path")
-            )
+        val c = URL("$base/player_api.php?username=$user&password=$pass&action=$act").openConnection() as HttpURLConnection
+        c.connectTimeout = 15000
+        c.readTimeout = 120000
+        c.setRequestProperty("User-Agent", "Mozilla/5.0")
+        JsonReader(InputStreamReader(c.inputStream, Charsets.UTF_8).buffered(65536)).use { r ->
+            val out = ArrayList<Item>()
+            r.beginArray()
+            while (r.hasNext()) out.add(readItem(r, series))
+            r.endArray()
+            out
         }
+    }
+
+    private fun JsonReader.optStr(): String = when (peek()) {
+        JsonToken.NULL -> { nextNull(); "" }
+        JsonToken.STRING, JsonToken.NUMBER -> nextString()
+        JsonToken.BOOLEAN -> nextBoolean().toString()
+        else -> { skipValue(); "" }
+    }
+
+    private fun readItem(r: JsonReader, series: Boolean): Item {
+        var id = ""; var name = ""; var img = ""; var cat = ""; var ext = ""
+        var added = 0L; var rating = ""; var plot = ""; var year = ""; var genre = ""
+        var backdrop: String? = null
+        r.beginObject()
+        while (r.hasNext()) {
+            when (r.nextName()) {
+                "stream_id", "series_id" -> id = r.optStr()
+                "name" -> name = r.optStr()
+                "stream_icon", "cover" -> img = r.optStr()
+                "category_id" -> cat = r.optStr()
+                "container_extension" -> ext = r.optStr()
+                "added", "last_modified" -> {
+                    val v = r.optStr().toLongOrNull() ?: 0L
+                    if (added == 0L) added = v
+                }
+                "rating" -> rating = r.optStr()
+                "plot" -> if (series) plot = r.optStr() else r.skipValue()
+                "genre" -> if (series) genre = r.optStr() else r.skipValue()
+                "year", "releaseDate", "release_date" -> {
+                    val v = r.optStr()
+                    if (year.isBlank()) year = v.take(4)
+                }
+                "backdrop_path" -> {
+                    if (series && r.peek() == JsonToken.BEGIN_ARRAY) {
+                        r.beginArray()
+                        if (r.hasNext()) backdrop = r.optStr().ifBlank { null }
+                        while (r.hasNext()) r.skipValue()
+                        r.endArray()
+                    } else r.skipValue()
+                }
+                else -> r.skipValue()
+            }
+        }
+        r.endObject()
+        return Item(
+            id = id, name = name, img = img.ifBlank { null }, cat = cat,
+            ext = ext.ifBlank { "mp4" }, added = added, rating = rating, plot = plot,
+            year = year, genre = genre, backdrop = backdrop
+        )
     }
 
     suspend fun vodInfo(id: String): Info? = withContext(Dispatchers.IO) {

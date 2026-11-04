@@ -14,3 +14,9 @@ L'APK est signe avec une cle fixe (app/debug.keystore) : chaque nouvelle version
 par-dessus l'ancienne sans rien perdre. Garde le depot GitHub en PRIVE.
 Pour mettre a jour : remplace les fichiers modifies dans le depot GitHub -> l'APK se refait
 tout seul (onglet Actions) -> telecharge-le -> installe-le sur la TV.
+
+INSTALLER AVEC DOWNLOADER (sur la TV)
+Le depot doit etre PUBLIC. A chaque build, l'APK est publie dans l'onglet "Releases" du depot.
+Dans Downloader, tape ce lien (remplace TONPSEUDO et TONDEPOT) :
+https://github.com/TONPSEUDO/TONDEPOT/releases/latest/download/app-debug.apk
+Le lien reste le meme a chaque mise a jour : il donne toujours la derniere version.

@@ -664,14 +664,14 @@ fun SettingsScreen(repo: Repo, scope: CoroutineScope, logout: () -> Unit) {
         Text("Contenu (chaînes, films, séries)", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = TXT)
         Text("Dernière mise à jour : ${fmtDate(repo.lastContentTs)}", fontSize = 13.sp, color = MUTED)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            opts.forEach { (d, l) -> Pill(l, repo.freqContent == d) { repo.setFreqContent(d) } }
+            opts.forEach { (d, l) -> Pill(l, repo.freqContent == d) { repo.updateFreqContent(d) } }
         }
         ActionButton("Mettre à jour maintenant", false) { scope.launch { repo.refreshContent(true) } }
         Spacer(Modifier.height(8.dp))
         Text("Guide TV (programmes)", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = TXT)
         Text("Dernière mise à jour : ${fmtDate(repo.lastEpgTs)}", fontSize = 13.sp, color = MUTED)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            opts.forEach { (d, l) -> Pill(l, repo.freqEpg == d) { repo.setFreqEpg(d) } }
+            opts.forEach { (d, l) -> Pill(l, repo.freqEpg == d) { repo.updateFreqEpg(d) } }
         }
         ActionButton("Mettre à jour le guide maintenant", false) { scope.launch { repo.syncEpg() } }
         Text(

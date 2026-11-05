@@ -92,8 +92,8 @@ class Repo(private val ctx: Context, val api: Xtream) {
     private var busy = false
     private var busyEpg = false
 
-    fun setFreqContent(d: Int) { freqContent = d; prefs.edit().putInt("freq_content", d).apply() }
-    fun setFreqEpg(d: Int) { freqEpg = d; prefs.edit().putInt("freq_epg", d).apply() }
+    fun updateFreqContent(d: Int) { freqContent = d; prefs.edit().putInt("freq_content", d).apply() }
+    fun updateFreqEpg(d: Int) { freqEpg = d; prefs.edit().putInt("freq_epg", d).apply() }
 
     companion object {
         fun wipe(ctx: Context) {

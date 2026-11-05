@@ -10,8 +10,8 @@ android {
         applicationId = "com.perso.iptv"
         minSdk = 23
         targetSdk = 34
-        versionCode = 6
-        versionName = "1.4.1"
+        versionCode = 9
+        versionName = "1.7"
     }
     signingConfigs {
         getByName("debug") {
@@ -41,6 +41,7 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.animation:animation")
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.media3:media3-exoplayer:1.3.1")

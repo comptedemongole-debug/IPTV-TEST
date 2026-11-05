@@ -40,12 +40,19 @@ class PlayerActivity : ComponentActivity() {
     private var live = false
     private var retried = false
     private var curUrl = ""
+    private var titleX = ""
+    private var imgX: String? = null
+    private var kindX = "vod"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val url = intent.getStringExtra("url") ?: run { finish(); return }
         live = intent.getBooleanExtra("live", false)
+        titleX = intent.getStringExtra("title") ?: ""
+        imgX = intent.getStringExtra("img")
+        kindX = intent.getStringExtra("kind") ?: "vod"
+        val startMs = intent.getLongExtra("start", 0L)
 
         val http = DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
@@ -91,14 +98,14 @@ class PlayerActivity : ComponentActivity() {
         setContentView(root)
         view.requestFocus()
 
-        start(url)
+        start(url, startMs)
         if (live && Zap.items.isNotEmpty()) flash()
     }
 
-    private fun start(url: String) {
+    private fun start(url: String, startMs: Long = 0L) {
         curUrl = url
         retried = false
-        exo?.setMediaItem(MediaItem.fromUri(url))
+        exo?.setMediaItem(MediaItem.fromUri(url), startMs)
         exo?.prepare()
         exo?.playWhenReady = true
     }
@@ -137,6 +144,17 @@ class PlayerActivity : ComponentActivity() {
             }
         }
         return super.dispatchKeyEvent(e)
+    }
+
+    override fun onStop() {
+        if (!live) {
+            val p = exo
+            val dur = p?.duration ?: -1L
+            if (p != null && dur > 0) {
+                Zap.repo?.saveResume(kindX, curUrl, titleX, imgX, p.currentPosition, dur)
+            }
+        }
+        super.onStop()
     }
 
     override fun onDestroy() {

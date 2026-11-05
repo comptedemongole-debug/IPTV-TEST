@@ -18,8 +18,14 @@ data class Item(
     val year: String = "", val genre: String = "", val backdrop: String? = null,
     val epgId: String = "", val lang: String = ""
 )
-data class Ep(val id: String, val title: String, val ext: String, val season: String)
-data class Info(val plot: String, val year: String, val duration: String, val genre: String, val backdrop: String?)
+data class Ep(
+    val id: String, val title: String, val ext: String, val season: String,
+    val plot: String = "", val duration: String = "", val img: String? = null, val num: String = ""
+)
+data class Info(
+    val plot: String, val year: String, val duration: String, val genre: String, val backdrop: String?,
+    val cast: String = "", val director: String = ""
+)
 data class Prog(val title: String, val start: Long, val stop: Long)
 
 private fun JSONObject.str(k: String): String {
@@ -127,11 +133,49 @@ class Xtream(server: String, private val user: String, private val pass: String)
                 o.str("releasedate").ifBlank { o.str("release_date") }.take(4),
                 o.str("duration"),
                 o.str("genre"),
-                o.firstOf("backdrop_path")
+                o.firstOf("backdrop_path"),
+                o.str("cast").ifBlank { o.str("actors") },
+                o.str("director")
             )
         } catch (e: Exception) {
             null
         }
+    }
+
+    suspend fun seriesDetail(seriesId: String): Pair<Info, List<Ep>> = withContext(Dispatchers.IO) {
+        val root = JSONObject(call("action=get_series_info&series_id=$seriesId"))
+        val o = root.optJSONObject("info")
+        val info = if (o != null) Info(
+            o.str("plot"),
+            o.str("releaseDate").ifBlank { o.str("release_date") }.take(4),
+            o.str("episode_run_time").let { if (it.isBlank()) "" else "$it min" },
+            o.str("genre"),
+            o.firstOf("backdrop_path"),
+            o.str("cast"),
+            o.str("director")
+        ) else Info("", "", "", "", null)
+        val out = mutableListOf<Ep>()
+        val eps = root.optJSONObject("episodes")
+        if (eps != null) {
+            eps.keys().asSequence().sortedBy { it.toIntOrNull() ?: 0 }.forEach { s ->
+                val arr = eps.optJSONArray(s) ?: return@forEach
+                for (i in 0 until arr.length()) {
+                    val e = arr.getJSONObject(i)
+                    val ei = e.optJSONObject("info")
+                    out += Ep(
+                        id = e.str("id"),
+                        title = e.str("title"),
+                        ext = e.str("container_extension").ifBlank { "mp4" },
+                        season = s,
+                        plot = ei?.str("plot") ?: "",
+                        duration = ei?.str("duration") ?: "",
+                        img = (ei?.str("movie_image") ?: "").ifBlank { null },
+                        num = e.str("episode_num")
+                    )
+                }
+            }
+        }
+        info to out
     }
 
     suspend fun episodes(seriesId: String): List<Ep> = withContext(Dispatchers.IO) {

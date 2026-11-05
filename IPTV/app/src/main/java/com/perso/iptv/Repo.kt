@@ -14,6 +14,11 @@ import java.util.Locale
 import java.util.TimeZone
 
 data class Shelf(val title: String, val items: List<Item>)
+data class Fav(val kind: String, val item: Item)
+data class Resume(
+    val kind: String, val url: String, val title: String, val img: String?,
+    val pos: Long, val dur: Long, val ts: Long
+)
 data class Data(
     val rows: List<Shelf>,
     val all: List<Item>,
@@ -163,6 +168,8 @@ class Repo(private val ctx: Context, val api: Xtream) {
         }
         data.putAll(loaded)
         loadHidden()
+        loadFavs()
+        loadResume()
         val e = withContext(Dispatchers.IO) { try { readEpg() } catch (e: Exception) { emptyMap() } }
         epg = e
         epgVersion++
@@ -399,6 +406,22 @@ class Repo(private val ctx: Context, val api: Xtream) {
         return keys.size
     }
 
+    /** Tout décocher : masque toutes les catégories du type. */
+    fun hideAllCats(kind: String) {
+        data[kind]?.cats?.forEach { c ->
+            val k = "$kind:${c.id}"
+            setC.add(k); hiddenCats[k] = c.name
+        }
+        persistHidden(); hiddenVersion++
+    }
+
+    /** Tout cocher : réaffiche toutes les catégories du type. */
+    fun showAllCats(kind: String) {
+        val keys = hiddenCats.keys.filter { it.startsWith("$kind:") }
+        keys.forEach { setC.remove(it); hiddenCats.remove(it) }
+        persistHidden(); hiddenVersion++
+    }
+
     fun isCatHidden(kind: String, id: String): Boolean = hiddenCats.containsKey("$kind:$id")
 
     private fun isHidden(kind: String, i: Item): Boolean =
@@ -412,6 +435,103 @@ class Repo(private val ctx: Context, val api: Xtream) {
         return buildData(cats, all)
     }
 
+    // ---------------- Ma liste (favoris) ----------------
+    val favs = mutableStateListOf<Fav>()
+
+    private fun persistFavs() {
+        val t = f("favs.tmp")
+        t.bufferedWriter().use { w ->
+            favs.forEach { fv ->
+                val i = fv.item
+                val parts = listOf(
+                    fv.kind, i.id, i.name, i.img ?: "", i.cat, i.ext, i.added.toString(), i.rating,
+                    i.plot, i.year, i.genre, i.backdrop ?: "", i.epgId, i.lang
+                )
+                w.write(parts.joinToString("\t") { clean(it) })
+                w.newLine()
+            }
+        }
+        t.renameTo(f("favs.tsv"))
+    }
+
+    private fun loadFavs() {
+        favs.clear()
+        val ff = f("favs.tsv")
+        if (!ff.exists()) return
+        try {
+            ff.readLines().forEach { l ->
+                val p = l.split('\t')
+                if (p.size >= 14) {
+                    favs.add(
+                        Fav(
+                            p[0],
+                            Item(
+                                id = p[1], name = p[2], img = p[3].ifBlank { null }, cat = p[4], ext = p[5],
+                                added = p[6].toLongOrNull() ?: 0L, rating = p[7], plot = p[8], year = p[9],
+                                genre = p[10], backdrop = p[11].ifBlank { null }, epgId = p[12], lang = p[13]
+                            )
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) { /* ignoré */ }
+    }
+
+    fun isFav(kind: String, item: Item): Boolean = favs.any { it.kind == kind && it.item.id == item.id }
+
+    fun toggleFav(kind: String, item: Item) {
+        val idx = favs.indexOfFirst { it.kind == kind && it.item.id == item.id }
+        if (idx >= 0) favs.removeAt(idx) else favs.add(0, Fav(kind, item))
+        persistFavs()
+    }
+
+    fun favItems(kind: String): List<Item> = favs.filter { it.kind == kind }.map { it.item }
+
+    // ---------------- Reprendre la lecture ----------------
+    val resumes = mutableStateListOf<Resume>()
+
+    private fun persistResume() {
+        val t = f("resume.tmp")
+        t.bufferedWriter().use { w ->
+            resumes.forEach { r ->
+                val parts = listOf(r.kind, r.url, r.title, r.img ?: "", r.pos.toString(), r.dur.toString(), r.ts.toString())
+                w.write(parts.joinToString("\t") { clean(it) })
+                w.newLine()
+            }
+        }
+        t.renameTo(f("resume.tsv"))
+    }
+
+    private fun loadResume() {
+        resumes.clear()
+        val fr = f("resume.tsv")
+        if (!fr.exists()) return
+        try {
+            fr.readLines().forEach { l ->
+                val p = l.split('\t')
+                if (p.size >= 7) {
+                    resumes.add(
+                        Resume(
+                            p[0], p[1], p[2], p[3].ifBlank { null },
+                            p[4].toLongOrNull() ?: 0L, p[5].toLongOrNull() ?: 0L, p[6].toLongOrNull() ?: 0L
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) { /* ignoré */ }
+    }
+
+    fun saveResume(kind: String, url: String, title: String, img: String?, pos: Long, dur: Long) {
+        resumes.removeAll { it.url == url }
+        if (dur > 0 && pos > 30_000 && pos < dur * 0.95) {
+            resumes.add(0, Resume(kind, url, title, img, pos, dur, System.currentTimeMillis()))
+            while (resumes.size > 20) resumes.removeAt(resumes.size - 1)
+        }
+        persistResume()
+    }
+
+    fun resumeFor(url: String): Resume? = resumes.firstOrNull { it.url == url }
+
     // ---------------- recherche ----------------
     suspend fun search(q: String): Triple<List<Item>, List<Item>, List<Item>> = withContext(Dispatchers.Default) {
         val t = q.trim()
@@ -419,7 +539,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
             Triple(emptyList<Item>(), emptyList<Item>(), emptyList<Item>())
         } else {
             fun find(k: String): List<Item> =
-                data[k]?.all?.filter { it.name.contains(t, ignoreCase = true) && !isHidden(k, it) }?.take(40) ?: emptyList()
+                data[k]?.all?.filter { it.name.contains(t, ignoreCase = true) }?.take(200) ?: emptyList()
             Triple(find("live"), find("vod"), find("series"))
         }
     }

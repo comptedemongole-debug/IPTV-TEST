@@ -24,7 +24,7 @@ data class Ep(
 )
 data class Info(
     val plot: String, val year: String, val duration: String, val genre: String, val backdrop: String?,
-    val cast: String = "", val director: String = ""
+    val cast: String = "", val director: String = "", val tmdb: String = ""
 )
 data class Prog(val title: String, val start: Long, val stop: Long)
 
@@ -135,7 +135,8 @@ class Xtream(server: String, private val user: String, private val pass: String)
                 o.str("genre"),
                 o.firstOf("backdrop_path"),
                 o.str("cast").ifBlank { o.str("actors") },
-                o.str("director")
+                o.str("director"),
+                o.str("tmdb_id").ifBlank { o.str("tmdb") }
             )
         } catch (e: Exception) {
             null
@@ -152,7 +153,8 @@ class Xtream(server: String, private val user: String, private val pass: String)
             o.str("genre"),
             o.firstOf("backdrop_path"),
             o.str("cast"),
-            o.str("director")
+            o.str("director"),
+            o.str("tmdb").ifBlank { o.str("tmdb_id") }
         ) else Info("", "", "", "", null)
         val out = mutableListOf<Ep>()
         val eps = root.optJSONObject("episodes")

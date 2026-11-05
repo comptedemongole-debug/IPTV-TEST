@@ -35,6 +35,27 @@ fun buildData(cats: List<Cat>, all: List<Item>): Data {
     return Data(rows, all, cats, by)
 }
 
+private val rEpLang = Regex(
+    """^\s*[\[(|]?\s*(FR|VF|VFF|VFQ|VOSTFR|STFR|EN|ENG|VO|VOST|MULTI|TRUEFRENCH|FRENCH)\s*[\])|]?\s*[-:|]?\s*""",
+    RegexOption.IGNORE_CASE
+)
+private val rEpSE = Regex("""\bs\d{1,2}\s*[-_ ]?\s*(e|ep|episode|épisode)?\s*\d{1,3}\b""", RegexOption.IGNORE_CASE)
+private val rEpSeason = Regex("""\b(saison|season)\s*\d+\b""", RegexOption.IGNORE_CASE)
+private val rEpNum = Regex("""\b(épisode|episode|ep)\s*\.?\s*\d+\b""", RegexOption.IGNORE_CASE)
+private val rSpaces = Regex("""\s+""")
+
+/** Nettoie un titre d'épisode du type « FR s04 episode 5 » : garde le vrai nom s'il existe, sinon « Épisode 5 ». */
+fun cleanEpTitle(title: String, series: String, num: String): String {
+    var t = title
+    t = rEpLang.replace(t, "")
+    t = rEpSE.replace(t, " ")
+    t = rEpSeason.replace(t, " ")
+    t = rEpNum.replace(t, " ")
+    if (series.isNotBlank()) t = t.replace(series, "", ignoreCase = true)
+    t = rSpaces.replace(t, " ").trim().trim('-', ':', '·', '|', '.', ' ')
+    return if (t.length >= 2) t else "Épisode ${num.ifBlank { "?" }}"
+}
+
 /** Détection de la langue (FR, EN, VOSTFR, MULTI…) dans le titre ou la catégorie. */
 object Lang {
     private val known = mapOf(
@@ -92,6 +113,20 @@ class Repo(private val ctx: Context, val api: Xtream) {
         private set
     var lastEpgTs by mutableStateOf(prefs.getLong("epg_ts", 0L))
         private set
+
+    var tmdbKey by mutableStateOf(prefs.getString("tmdb_key", null) ?: readAssetKey())
+        private set
+
+    private fun readAssetKey(): String = try {
+        ctx.assets.open("tmdb_key.txt").bufferedReader().use { it.readText().trim() }
+    } catch (e: Exception) {
+        ""
+    }
+
+    fun updateTmdbKey(k: String) {
+        tmdbKey = k.trim()
+        prefs.edit().putString("tmdb_key", k.trim()).apply()
+    }
 
     private var epg: Map<String, List<Prog>> = emptyMap()
     private var busy = false

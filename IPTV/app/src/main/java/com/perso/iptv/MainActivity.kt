@@ -34,6 +34,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -229,8 +231,6 @@ fun Home(api: Xtream, logout: () -> Unit) {
     var tab by remember { mutableStateOf(1) }
     var cacheLoaded by remember { mutableStateOf(false) }
     var detail by remember { mutableStateOf<Pair<String, Item>?>(null) }
-    var focused by remember { mutableStateOf<Item?>(null) }
-    var info by remember { mutableStateOf<Info?>(null) }
 
     BackHandler(enabled = detail != null) { detail = null }
 
@@ -253,22 +253,15 @@ fun Home(api: Xtream, logout: () -> Unit) {
     val data = if (kind.isEmpty()) null else repo.data[kind]
     val vis = data?.let { d -> remember(d, repo.hiddenVersion) { repo.visible(kind, d) } }
 
-    LaunchedEffect(tab) { focused = null; info = null }
     val pageAlpha = remember { Animatable(1f) }
     LaunchedEffect(tab) {
         pageAlpha.snapTo(0f)
         pageAlpha.animateTo(1f, tween(350))
     }
-    val shown = focused ?: vis?.rows?.firstOrNull()?.items?.firstOrNull()
-    LaunchedEffect(shown?.id, kind) {
-        info = null
-        val cur = shown ?: return@LaunchedEffect
-        if (kind == "vod") {
-            delay(350)
-            info = api.vodInfo(cur.id)
-        }
+    val hero = remember(kind) { HeroState() }
+    if (tab == 1 || tab == 2) {
+        HeroEffects(hero, kind, api, vis?.rows?.firstOrNull()?.items?.firstOrNull())
     }
-    val heroInfo = if (kind == "series") shown?.let { Info(it.plot, it.year, "", it.genre, it.backdrop) } else info
 
     val openItem: (String, Item, List<Item>, Int) -> Unit = { k, item, sib, idx ->
         when (k) {
@@ -287,7 +280,7 @@ fun Home(api: Xtream, logout: () -> Unit) {
         }
     } else {
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(BG_TOP, BG)))) {
-            if (tab == 1 || tab == 2) Backdrop(heroInfo?.backdrop ?: shown?.backdrop ?: shown?.img)
+            if (tab == 1 || tab == 2) HeroBackdrop(hero)
             Column(Modifier.fillMaxSize()) {
                 TopBar(tab, { tab = it }, repo.status)
                 Box(Modifier.fillMaxSize().graphicsLayer { alpha = pageAlpha.value }) {
@@ -310,21 +303,18 @@ fun Home(api: Xtream, logout: () -> Unit) {
                         openItem("live", ch, list, idx)
                     }
                     else -> Browse(
-                        vis, kind, shown, heroInfo,
+                        vis, kind, hero,
                         favs = repo.favItems(kind),
                         resumes = repo.resumes.filter { it.kind == kind },
-                        onPlay = {
-                            shown?.let { sh ->
-                                if (kind == "vod") {
-                                    val u = api.vodUrl(sh.id, sh.ext)
-                                    play(ctx, u, sh.name, false, sh.img, "vod", repo.resumeFor(u)?.pos ?: 0L)
-                                } else {
-                                    openItem(kind, sh, emptyList(), 0)
-                                }
+                        onPlay = { sh ->
+                            if (kind == "vod") {
+                                val u = api.vodUrl(sh.id, sh.ext)
+                                play(ctx, u, sh.name, false, sh.img, "vod", repo.resumeFor(u)?.pos ?: 0L)
+                            } else {
+                                openItem(kind, sh, emptyList(), 0)
                             }
                         },
-                        onInfo = { shown?.let { detail = kind to it } },
-                        onFocus = { focused = it },
+                        onInfo = { sh -> detail = kind to sh },
                         onResume = { r -> play(ctx, r.url, r.title, false, r.img, r.kind, r.pos) },
                         onOpen = { openItem(kind, it, emptyList(), 0) }
                     )
@@ -361,11 +351,12 @@ fun LoadingView(repo: Repo, cacheLoaded: Boolean, onRetry: () -> Unit) {
 @Composable
 fun Backdrop(url: String?) {
     Box(Modifier.fillMaxSize()) {
-        Crossfade(targetState = url, animationSpec = tween(600), label = "backdrop") { u ->
+        Crossfade(targetState = url, animationSpec = tween(400), label = "backdrop") { u ->
             Box(Modifier.fillMaxSize()) {
                 if (u != null) {
                     AsyncImage(
-                        model = u, contentDescription = null, contentScale = ContentScale.Crop,
+                        model = ImageRequest.Builder(LocalContext.current).data(u).size(1280, 720).build(),
+                        contentDescription = null, contentScale = ContentScale.Crop,
                         modifier = Modifier.align(Alignment.TopEnd).fillMaxWidth(0.8f).fillMaxHeight(0.72f)
                     )
                 }
@@ -447,54 +438,98 @@ fun ActionButton(text: String, primary: Boolean, onClick: () -> Unit) {
 }
 
 // ---------------------------------------------------------------- Films / Séries
+/** État de la bannière : isolé pour que bouger dans les affiches ne redessine pas toute la page. */
+class HeroState {
+    var item by mutableStateOf<Item?>(null)
+    var shown by mutableStateOf<Item?>(null)
+    var info by mutableStateOf<Info?>(null)
+}
+
+@Composable
+fun HeroEffects(hero: HeroState, kind: String, api: Xtream, first: Item?) {
+    LaunchedEffect(first?.id) {
+        if (hero.shown == null) {
+            hero.item = first
+            hero.shown = first
+        }
+    }
+    val raw = hero.item
+    LaunchedEffect(raw?.id) {
+        delay(250)
+        hero.shown = hero.item
+    }
+    val cur = hero.shown
+    LaunchedEffect(cur?.id, kind) {
+        hero.info = if (kind == "series" && cur != null) Info(cur.plot, cur.year, "", cur.genre, cur.backdrop) else null
+        if (kind == "vod" && cur != null) {
+            delay(400)
+            hero.info = api.vodInfo(cur.id)
+        }
+    }
+}
+
+@Composable
+fun HeroBackdrop(hero: HeroState) {
+    val sh = hero.shown
+    Backdrop(hero.info?.backdrop ?: sh?.backdrop ?: sh?.img)
+}
+
+@Composable
+fun HeroPanel(hero: HeroState, kind: String, onPlay: (Item) -> Unit, onInfo: (Item) -> Unit) {
+    val item = hero.shown
+    val info = hero.info
+    Column(Modifier.fillMaxWidth(0.6f).height(230.dp).padding(start = 32.dp, top = 6.dp)) {
+        AnimatedContent(
+            targetState = item?.id,
+            transitionSpec = { fadeIn(tween(300)) togetherWith fadeOut(tween(150)) },
+            label = "hero"
+        ) { _ ->
+            Column {
+                Text(
+                    item?.name ?: "", fontSize = 34.sp, lineHeight = 38.sp, fontWeight = FontWeight.Black,
+                    color = Color.White, maxLines = 2, overflow = TextOverflow.Ellipsis
+                )
+                val meta = listOfNotNull(
+                    item?.rating?.takeIf { it.isNotBlank() && it != "0" && it != "0.0" }?.let { "★ $it" },
+                    info?.year?.takeIf { it.isNotBlank() },
+                    info?.duration?.takeIf { it.isNotBlank() },
+                    info?.genre?.takeIf { it.isNotBlank() }
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    item?.lang?.takeIf { it.isNotBlank() }?.let { l ->
+                        Text(
+                            l, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White,
+                            modifier = Modifier.background(langColor(l), RoundedCornerShape(50))
+                                .padding(horizontal = 9.dp, vertical = 2.dp)
+                        )
+                    }
+                    Text(meta.joinToString("  •  "), fontSize = 13.sp, color = MUTED, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(info?.plot.orEmpty(), fontSize = 13.sp, lineHeight = 18.sp, color = MUTED, maxLines = 3, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        Spacer(Modifier.weight(1f))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            ActionButton(if (kind == "series") "▶ Épisodes" else "▶ Lecture", true) { item?.let(onPlay) }
+            ActionButton("Plus d'infos", false) { item?.let(onInfo) }
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
 @Composable
 fun Browse(
-    data: Data, kind: String, item: Item?, info: Info?,
+    data: Data, kind: String, hero: HeroState,
     favs: List<Item>, resumes: List<Resume>,
-    onPlay: () -> Unit, onInfo: () -> Unit, onFocus: (Item) -> Unit,
+    onPlay: (Item) -> Unit, onInfo: (Item) -> Unit,
     onResume: (Resume) -> Unit, onOpen: (Item) -> Unit
 ) {
     val top = remember(data) { data.rows.firstOrNull()?.items?.take(10) ?: emptyList() }
+    val onFocus: (Item) -> Unit = remember(hero) { { i: Item -> hero.item = i } }
     Column(Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxWidth(0.6f).height(230.dp).padding(start = 32.dp, top = 6.dp)) {
-            AnimatedContent(
-                targetState = item?.id,
-                transitionSpec = { fadeIn(tween(350)) togetherWith fadeOut(tween(200)) },
-                label = "hero"
-            ) { _ ->
-                Column {
-                    Text(
-                        item?.name ?: "", fontSize = 34.sp, lineHeight = 38.sp, fontWeight = FontWeight.Black,
-                        color = Color.White, maxLines = 2, overflow = TextOverflow.Ellipsis
-                    )
-                    val meta = listOfNotNull(
-                        item?.rating?.takeIf { it.isNotBlank() && it != "0" && it != "0.0" }?.let { "★ $it" },
-                        info?.year?.takeIf { it.isNotBlank() },
-                        info?.duration?.takeIf { it.isNotBlank() },
-                        info?.genre?.takeIf { it.isNotBlank() }
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        item?.lang?.takeIf { it.isNotBlank() }?.let { l ->
-                            Text(
-                                l, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White,
-                                modifier = Modifier.background(langColor(l), RoundedCornerShape(50))
-                                    .padding(horizontal = 9.dp, vertical = 2.dp)
-                            )
-                        }
-                        Text(meta.joinToString("  •  "), fontSize = 13.sp, color = MUTED, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    Text(info?.plot.orEmpty(), fontSize = 13.sp, lineHeight = 18.sp, color = MUTED, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                }
-            }
-            Spacer(Modifier.weight(1f))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                ActionButton(if (kind == "series") "▶ Épisodes" else "▶ Lecture", true, onPlay)
-                ActionButton("Plus d'infos", false, onInfo)
-            }
-            Spacer(Modifier.height(8.dp))
-        }
+        HeroPanel(hero, kind, onPlay, onInfo)
         LazyColumn(Modifier.fillMaxSize()) {
             if (resumes.isNotEmpty()) {
                 item {
@@ -572,16 +607,18 @@ fun Browse(
 @Composable
 fun Poster(item: Item, ratio: Float, fit: Boolean, onFocus: (Item) -> Unit, progress: Float = -1f, onClick: () -> Unit) {
     var f by remember { mutableStateOf(false) }
-    val sc by animateFloatAsState(if (f) 1.1f else 1f, tween(180), label = "scale")
+    val sc = animateFloatAsState(if (f) 1.1f else 1f, tween(180), label = "scale")
+    val pctx = LocalContext.current
+    val req = remember(item.img) { ImageRequest.Builder(pctx).data(item.img).size(300, 450).crossfade(150).build() }
     Box(
-        Modifier.width(124.dp).scale(sc)
+        Modifier.width(124.dp).graphicsLayer { scaleX = sc.value; scaleY = sc.value }
             .onFocusChanged { f = it.isFocused; if (it.isFocused) onFocus(item) }
             .border(3.dp, if (f) Color.White else Color.Transparent, RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)
             .padding(3.dp)
     ) {
         AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current).data(item.img).crossfade(400).build(),
+            model = req,
             contentDescription = item.name,
             contentScale = if (fit) ContentScale.Fit else ContentScale.Crop,
             modifier = Modifier.fillMaxWidth().aspectRatio(ratio)
@@ -645,17 +682,25 @@ fun DetailScreen(
             if (kind == "series") eps = emptyList()
         }
     }
+    var tm by remember(item.id) { mutableStateOf<Map<String, Map<Int, TmEp>>>(emptyMap()) }
+    var tmMv by remember(item.id) { mutableStateOf<TmMovie?>(null) }
+    LaunchedEffect(item.id, info?.tmdb, repo.tmdbKey) {
+        if (kind == "vod" && repo.tmdbKey.isNotBlank()) {
+            delay(500)
+            tmMv = Tmdb.movie(repo.tmdbKey, info?.tmdb ?: "", item.name, (info?.year ?: "").ifBlank { item.year })
+        }
+    }
     val inf = info
-    val plot = (inf?.plot ?: "").ifBlank { item.plot }
-    val backdrop = inf?.backdrop ?: item.backdrop ?: item.img
+    val plot = (inf?.plot ?: "").ifBlank { item.plot }.ifBlank { tmMv?.overview ?: "" }
+    val backdrop = inf?.backdrop ?: item.backdrop ?: tmMv?.backdrop ?: item.img
     val vodUrl = api.vodUrl(item.id, item.ext)
     val resume = if (kind == "vod") repo.resumeFor(vodUrl) else null
     val fav = repo.isFav(kind, item)
     val meta = listOfNotNull(
-        item.rating.takeIf { it.isNotBlank() && it != "0" && it != "0.0" }?.let { "★ $it" },
-        (inf?.year ?: "").ifBlank { item.year }.takeIf { it.isNotBlank() },
-        inf?.duration?.takeIf { it.isNotBlank() },
-        (inf?.genre ?: "").ifBlank { item.genre }.takeIf { it.isNotBlank() }
+        item.rating.ifBlank { tmMv?.rating ?: "" }.takeIf { it.isNotBlank() && it != "0" && it != "0.0" }?.let { "★ $it" },
+        (inf?.year ?: "").ifBlank { item.year }.ifBlank { tmMv?.year ?: "" }.takeIf { it.isNotBlank() },
+        (inf?.duration ?: "").ifBlank { tmMv?.runtime ?: "" }.takeIf { it.isNotBlank() },
+        (inf?.genre ?: "").ifBlank { item.genre }.ifBlank { tmMv?.genre ?: "" }.takeIf { it.isNotBlank() }
     )
     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(BG_TOP, BG)))) {
         Backdrop(backdrop)
@@ -690,11 +735,11 @@ fun DetailScreen(
                     fontSize = 14.sp, lineHeight = 20.sp, color = MUTED,
                     maxLines = if (kind == "series") 3 else 6, overflow = TextOverflow.Ellipsis
                 )
-                inf?.cast?.takeIf { it.isNotBlank() }?.let {
+                (inf?.cast ?: "").ifBlank { tmMv?.cast ?: "" }.takeIf { it.isNotBlank() }?.let {
                     Spacer(Modifier.height(6.dp))
                     Text("Avec : $it", fontSize = 13.sp, color = MUTED, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
-                inf?.director?.takeIf { it.isNotBlank() }?.let {
+                (inf?.director ?: "").ifBlank { tmMv?.director ?: "" }.takeIf { it.isNotBlank() }?.let {
                     Text("De : $it", fontSize = 13.sp, color = MUTED, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 Spacer(Modifier.height(14.dp))
@@ -734,12 +779,21 @@ fun DetailScreen(
                 } else {
                     val seasons = list.map { it.season }.distinct()
                     val sSel = season.ifBlank { seasons.first() }
+                    LaunchedEffect(sSel, inf?.tmdb, repo.tmdbKey) {
+                        val key = repo.tmdbKey
+                        if (key.isNotBlank() && !tm.containsKey(sSel)) {
+                            val id = (inf?.tmdb ?: "").ifBlank { Tmdb.findTv(key, item.name) ?: "" }
+                            if (id.isNotBlank()) tm = tm + (sSel to Tmdb.season(key, id, sSel))
+                        }
+                    }
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         items(seasons) { sn -> Pill("Saison $sn", sn == sSel) { season = sn } }
                     }
                     Spacer(Modifier.height(8.dp))
                     LazyColumn(Modifier.fillMaxSize()) {
-                        items(list.filter { it.season == sSel }) { ep -> EpisodeRow(repo, api, item, ep, onPlay) }
+                        items(list.filter { it.season == sSel }) { ep ->
+                            EpisodeRow(repo, api, item, ep, tm[sSel]?.get(ep.num.toIntOrNull() ?: -1), onPlay)
+                        }
                     }
                 }
             }
@@ -749,7 +803,7 @@ fun DetailScreen(
 
 @Composable
 fun EpisodeRow(
-    repo: Repo, api: Xtream, series: Item, ep: Ep,
+    repo: Repo, api: Xtream, series: Item, ep: Ep, tm: TmEp?,
     onPlay: (String, String, String?, String, Long) -> Unit
 ) {
     var f by remember { mutableStateOf(false) }
@@ -761,13 +815,13 @@ fun EpisodeRow(
         Modifier.fillMaxWidth()
             .onFocusChanged { f = it.isFocused }
             .background(if (f) Color(0x33FFFFFF) else Color.Transparent, RoundedCornerShape(10.dp))
-            .clickable { onPlay(url, title, ep.img ?: series.img, "series", r?.pos ?: 0L) }
+            .clickable { onPlay(url, title, ep.img ?: tm?.still ?: series.img, "series", r?.pos ?: 0L) }
             .padding(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(Modifier.width(128.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp)).background(Color(0xFF1C1C24))) {
             AsyncImage(
-                model = ep.img ?: series.img, contentDescription = null,
+                model = ep.img ?: tm?.still ?: series.img, contentDescription = null,
                 contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()
             )
             if (r != null && r.dur > 0) {
@@ -778,9 +832,11 @@ fun EpisodeRow(
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text("$label.  ${ep.title}", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = TXT, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            val epName = tm?.name?.takeIf { it.isNotBlank() } ?: cleanEpTitle(ep.title, series.name, label)
+            val epPlot = (tm?.overview ?: "").ifBlank { ep.plot }
+            Text("$label.  $epName", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = TXT, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (ep.duration.isNotBlank()) Text(ep.duration, fontSize = 12.sp, color = MUTED)
-            if (ep.plot.isNotBlank()) Text(ep.plot, fontSize = 12.sp, color = MUTED, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (epPlot.isNotBlank()) Text(epPlot, fontSize = 12.sp, color = MUTED, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -968,39 +1024,41 @@ fun HiddenScreen(repo: Repo) {
     var kind by remember { mutableStateOf("live") }
     var kw by remember { mutableStateOf("") }
     var msg by remember { mutableStateOf("") }
-    val cats = repo.data[kind]?.cats ?: emptyList()
-    val hiddenList = repo.hiddenItems.entries.filter { it.key.startsWith("$kind:") }.map { it.key to it.value }
+    val filtering = kw.isNotBlank()
+    val cats = (repo.data[kind]?.cats ?: emptyList()).filter { !filtering || it.name.contains(kw.trim(), ignoreCase = true) }
+    val hiddenList = repo.hiddenItems.entries
+        .filter { it.key.startsWith("$kind:") && (!filtering || it.value.contains(kw.trim(), ignoreCase = true)) }
+        .map { it.key to it.value }
     Column(Modifier.fillMaxSize().padding(horizontal = 32.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             listOf("live" to "TV", "vod" to "Films", "series" to "Séries").forEach { (k, l) ->
-                Pill(l, kind == k) { kind = k }
+                Pill(l, kind == k) { kind = k; msg = "" }
             }
         }
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
                 kw, { kw = it }, singleLine = true,
-                placeholder = { Text("Mot du nom : DAZN, TURK, TR…") },
-                modifier = Modifier.width(300.dp)
+                placeholder = { Text("Rechercher une catégorie : DAZN, TURK…") },
+                modifier = Modifier.width(320.dp)
             )
-            ActionButton("Masquer ces catégories", true) { msg = "${repo.hideCatsMatching(kind, kw)} catégorie(s) masquée(s)" }
-            ActionButton("Réafficher", false) { msg = "${repo.showCatsMatching(kind, kw)} catégorie(s) réaffichée(s)" }
+            ActionButton(if (filtering) "✓ Cocher les ${cats.size} résultats" else "✓ Tout cocher", false) {
+                if (filtering) repo.showCatsMatching(kind, kw) else repo.showAllCats(kind)
+                msg = if (filtering) "Ces catégories sont affichées" else "Toutes les catégories sont affichées"
+            }
+            ActionButton(if (filtering) "✕ Décocher les ${cats.size} résultats" else "✕ Tout décocher", false) {
+                if (filtering) repo.hideCatsMatching(kind, kw) else repo.hideAllCats(kind)
+                msg = if (filtering) "Ces catégories sont masquées" else "Toutes les catégories sont masquées : coche celles que tu veux garder"
+            }
         }
         if (msg.isNotBlank()) Text(msg, fontSize = 13.sp, color = ACCENT)
         Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            ActionButton("✓ Tout cocher", false) {
-                repo.showAllCats(kind); msg = "Toutes les catégories sont affichées"
-            }
-            ActionButton("✕ Tout décocher", false) {
-                repo.hideAllCats(kind); msg = "Toutes les catégories sont masquées : coche celles que tu veux garder"
-            }
-            Text("Astuce : « Tout décocher », puis coche seulement tes catégories.", fontSize = 12.sp, color = MUTED)
-        }
-        Spacer(Modifier.height(6.dp))
         Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
             Column(Modifier.weight(1f)) {
-                Text("Catégories (OK pour masquer ou afficher)", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = TXT)
+                Text(
+                    "Catégories (${cats.size}) : OK pour cocher ou décocher",
+                    fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = TXT
+                )
                 Spacer(Modifier.height(6.dp))
                 LazyColumn {
                     items(cats) { c ->
@@ -1014,7 +1072,7 @@ fun HiddenScreen(repo: Repo) {
                 Spacer(Modifier.height(6.dp))
                 if (hiddenList.isEmpty() && hv >= 0) {
                     Text(
-                        "Aucun pour l'instant. Pour masquer : « Plus d'infos » sur un film ou une série, ou le bouton « Masquer cette chaîne » dans l'onglet TV.",
+                        "Aucun pour l'instant. Pour masquer : page de détail d'un film ou d'une série, ou le panneau d'une chaîne dans l'onglet TV.",
                         fontSize = 13.sp, color = MUTED
                     )
                 }
@@ -1032,7 +1090,7 @@ fun SettingsScreen(repo: Repo, scope: CoroutineScope, logout: () -> Unit) {
     var confirm by remember { mutableStateOf(false) }
     val opts = listOf(1 to "Chaque jour", 3 to "Tous les 3 jours", 7 to "Chaque semaine", 30 to "Chaque mois")
     Column(
-        Modifier.fillMaxSize().padding(horizontal = 32.dp, vertical = 8.dp),
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 32.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Text("Réglages", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = TXT)
@@ -1051,6 +1109,22 @@ fun SettingsScreen(repo: Repo, scope: CoroutineScope, logout: () -> Unit) {
         ActionButton("Mettre à jour le guide maintenant", false) { scope.launch { repo.syncEpg() } }
         Text(
             "Les mises à jour se font à l'ouverture de l'appli, quand le délai choisi est dépassé.",
+            fontSize = 12.sp, color = MUTED
+        )
+        Spacer(Modifier.height(8.dp))
+        Text("Noms des épisodes (TMDB, facultatif)", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = TXT)
+        var tkey by remember { mutableStateOf(repo.tmdbKey) }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                tkey, { tkey = it }, singleLine = true,
+                placeholder = { Text("Clé API TMDB (v3)") },
+                modifier = Modifier.width(380.dp)
+            )
+            ActionButton("Enregistrer", false) { repo.updateTmdbKey(tkey) }
+        }
+        Text(
+            if (repo.tmdbKey.isBlank()) "Sans clé : les titres sont nettoyés (« Épisode 5 »)."
+            else "Clé enregistrée : vrais noms d'épisodes, et fiches de films complétées (synopsis, acteurs, image). Données : TMDB.",
             fontSize = 12.sp, color = MUTED
         )
         if (repo.status.isNotBlank()) Text(repo.status, fontSize = 13.sp, color = ACCENT)

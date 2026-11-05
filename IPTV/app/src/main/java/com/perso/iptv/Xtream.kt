@@ -15,7 +15,8 @@ data class Cat(val id: String, val name: String)
 data class Item(
     val id: String, val name: String, val img: String?, val cat: String, val ext: String,
     val added: Long = 0, val rating: String = "", val plot: String = "",
-    val year: String = "", val genre: String = "", val backdrop: String? = null
+    val year: String = "", val genre: String = "", val backdrop: String? = null,
+    val epgId: String = "", val lang: String = ""
 )
 data class Ep(val id: String, val title: String, val ext: String, val season: String)
 data class Info(val plot: String, val year: String, val duration: String, val genre: String, val backdrop: String?)
@@ -77,6 +78,7 @@ class Xtream(server: String, private val user: String, private val pass: String)
         var id = ""; var name = ""; var img = ""; var cat = ""; var ext = ""
         var added = 0L; var rating = ""; var plot = ""; var year = ""; var genre = ""
         var backdrop: String? = null
+        var epgId = ""
         r.beginObject()
         while (r.hasNext()) {
             when (r.nextName()) {
@@ -89,6 +91,7 @@ class Xtream(server: String, private val user: String, private val pass: String)
                     val v = r.optStr().toLongOrNull() ?: 0L
                     if (added == 0L) added = v
                 }
+                "epg_channel_id" -> epgId = r.optStr()
                 "rating" -> rating = r.optStr()
                 "plot" -> if (series) plot = r.optStr() else r.skipValue()
                 "genre" -> if (series) genre = r.optStr() else r.skipValue()
@@ -111,7 +114,7 @@ class Xtream(server: String, private val user: String, private val pass: String)
         return Item(
             id = id, name = name, img = img.ifBlank { null }, cat = cat,
             ext = ext.ifBlank { "mp4" }, added = added, rating = rating, plot = plot,
-            year = year, genre = genre, backdrop = backdrop
+            year = year, genre = genre, backdrop = backdrop, epgId = epgId
         )
     }
 
@@ -166,6 +169,14 @@ class Xtream(server: String, private val user: String, private val pass: String)
         } catch (e: Exception) {
             emptyList()
         }
+    }
+
+    fun xmltvStream(): java.io.InputStream {
+        val c = URL("$base/xmltv.php?username=$user&password=$pass").openConnection() as HttpURLConnection
+        c.connectTimeout = 15000
+        c.readTimeout = 180000
+        c.setRequestProperty("User-Agent", "Mozilla/5.0")
+        return c.inputStream
     }
 
     fun liveUrl(id: String) = "$base/live/$user/$pass/$id.m3u8"

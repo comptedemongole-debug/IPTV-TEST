@@ -13,10 +13,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -38,10 +36,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -52,26 +50,26 @@ private val MUTED = Color(0xFFC9C9D2)
 private val ACCENT = Color(0xFFE5484D)
 private val PILL = Color(0xFF34343F)
 
-private val TAB_NAMES = listOf("TV", "Guide", "Films", "Séries")
-private fun kindOf(tab: Int) = when (tab) { 0, 1 -> "live"; 2 -> "vod"; else -> "series" }
-
-data class Shelf(val title: String, val items: List<Item>)
-data class Data(val rows: List<Shelf>, val all: List<Item>, val cats: List<Cat>)
-
-private fun buildData(cats: List<Cat>, all: List<Item>): Data {
-    val by = all.groupBy { it.cat }
-    val rows = mutableListOf<Shelf>()
-    val recent = all.sortedByDescending { it.added }.take(30)
-    if (recent.isNotEmpty() && recent.first().added > 0) rows += Shelf("Récemment ajoutés", recent)
-    cats.forEach { c -> by[c.id]?.let { rows += Shelf(c.name, it.take(40)) } }
-    return Data(rows, all, cats)
-}
-
-private fun play(ctx: Context, url: String, title: String) {
-    ctx.startActivity(Intent(ctx, PlayerActivity::class.java).putExtra("url", url).putExtra("title", title))
-}
+private val TAB_NAMES = listOf("TV", "Films", "Séries", "Recherche", "Masqués", "Réglages")
 
 private fun clock(): String = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+private fun fmtDate(ts: Long): String =
+    if (ts == 0L) "jamais" else SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault()).format(Date(ts))
+
+private fun play(ctx: Context, url: String, title: String, live: Boolean) {
+    ctx.startActivity(
+        Intent(ctx, PlayerActivity::class.java)
+            .putExtra("url", url).putExtra("title", title).putExtra("live", live)
+    )
+}
+
+private fun langColor(l: String): Color = when (l) {
+    "FR" -> Color(0xFF2D5BFF)
+    "EN", "VO" -> Color(0xFFE5484D)
+    "VOSTFR" -> Color(0xFF8E4EC6)
+    "MULTI" -> Color(0xFF2E9E6B)
+    else -> Color(0xFF555566)
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -121,7 +119,11 @@ fun App() {
             api = Xtream(s, u, p)
         }
     } else {
-        Home(a) { prefs.edit().clear().apply(); api = null }
+        Home(a) {
+            Repo.wipe(ctx)
+            prefs.edit().clear().apply()
+            api = null
+        }
     }
 }
 
@@ -147,57 +149,57 @@ fun Login(onOk: (String, String, String) -> Unit) {
 fun Home(api: Xtream, logout: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
-    var tab by remember { mutableStateOf(2) }
-    val cache = remember { mutableStateMapOf<String, Data>() }
-    var error by remember { mutableStateOf<String?>(null) }
+    val repo = remember(api) { Repo(ctx.applicationContext, api) }
+    var tab by remember { mutableStateOf(1) }
+    var cacheLoaded by remember { mutableStateOf(false) }
     var episodes by remember { mutableStateOf<List<Ep>?>(null) }
     var seriesName by remember { mutableStateOf("") }
-    var searching by remember { mutableStateOf(false) }
-    var query by remember { mutableStateOf("") }
     var focused by remember { mutableStateOf<Item?>(null) }
     var info by remember { mutableStateOf<Info?>(null) }
-    var now by remember { mutableStateOf<String?>(null) }
     var showInfo by remember { mutableStateOf(false) }
-    var showLogout by remember { mutableStateOf(false) }
-    val kind = kindOf(tab)
-    val data = cache[kind]
 
     BackHandler(enabled = episodes != null) { episodes = null }
-    BackHandler(enabled = searching && episodes == null) { searching = false; query = "" }
 
-    LaunchedEffect(kind) {
-        focused = null; info = null; now = null
-        if (cache[kind] == null) {
-            error = null
-            try {
-                val d = withContext(Dispatchers.IO) { buildData(api.cats(kind), api.items(kind)) }
-                cache[kind] = d
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Throwable) {
-                error = "Erreur : ${e.javaClass.simpleName} ${e.message ?: ""}"
-            }
+    LaunchedEffect(repo) {
+        try {
+            repo.loadCache()
+            cacheLoaded = true
+            repo.refreshContent(false)
+            repo.syncEpgIfDue()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            repo.status = "Erreur : ${e.javaClass.simpleName} ${e.message ?: ""}"
         }
     }
 
-    val shown = focused ?: data?.rows?.firstOrNull()?.items?.firstOrNull()
+    val kind = when (tab) { 0 -> "live"; 1 -> "vod"; 2 -> "series"; else -> "" }
+    val data = if (kind.isEmpty()) null else repo.data[kind]
+    val vis = data?.let { d -> remember(d, repo.hiddenVersion) { repo.visible(kind, d) } }
+
+    LaunchedEffect(tab) { focused = null; info = null }
+    val shown = focused ?: vis?.rows?.firstOrNull()?.items?.firstOrNull()
     LaunchedEffect(shown?.id, kind) {
-        info = null; now = null
+        info = null
         val cur = shown ?: return@LaunchedEffect
-        delay(350)
-        if (kind == "vod") info = api.vodInfo(cur.id)
-        else if (kind == "live") now = api.epg(cur.id).firstOrNull()?.title
+        if (kind == "vod") {
+            delay(350)
+            info = api.vodInfo(cur.id)
+        }
     }
     val heroInfo = if (kind == "series") shown?.let { Info(it.plot, it.year, "", it.genre, it.backdrop) } else info
 
-    val open: (Item) -> Unit = { item ->
-        when (kind) {
+    val openItem: (String, Item, List<Item>, Int) -> Unit = { k, item, sib, idx ->
+        when (k) {
             "series" -> scope.launch {
                 seriesName = item.name
                 episodes = try { api.episodes(item.id) } catch (e: Exception) { emptyList() }
             }
-            "vod" -> play(ctx, api.vodUrl(item.id, item.ext), item.name)
-            else -> play(ctx, api.liveUrl(item.id), item.name)
+            "vod" -> play(ctx, api.vodUrl(item.id, item.ext), item.name, false)
+            else -> {
+                Zap.items = sib; Zap.index = idx; Zap.api = api; Zap.repo = repo
+                play(ctx, api.liveUrl(item.id), item.name, true)
+            }
         }
     }
 
@@ -209,28 +211,33 @@ fun Home(api: Xtream, logout: () -> Unit) {
             if (eps.isEmpty()) Text("Aucun épisode trouvé.", color = MUTED)
             LazyColumn {
                 items(eps) { ep ->
-                    FocusRow("S${ep.season}  ·  ${ep.title}") { play(ctx, api.epUrl(ep.id, ep.ext), ep.title) }
+                    FocusRow("S${ep.season}  ·  ${ep.title}") { play(ctx, api.epUrl(ep.id, ep.ext), ep.title, false) }
                 }
             }
         }
     } else {
         Box(Modifier.fillMaxSize().background(BG)) {
-            if (!searching && tab != 1 && kind != "live") {
-                Backdrop(heroInfo?.backdrop ?: shown?.backdrop ?: shown?.img)
-            }
+            if (tab == 1 || tab == 2) Backdrop(heroInfo?.backdrop ?: shown?.backdrop ?: shown?.img)
             Column(Modifier.fillMaxSize()) {
-                TopBar(tab, { tab = it; searching = false; query = "" }, { searching = true }, { showLogout = true })
+                TopBar(tab, { tab = it }, repo.status)
                 when {
-                    error != null -> Box(Modifier.fillMaxSize(), Alignment.Center) { Text(error ?: "", color = TXT) }
-                    data == null -> Box(Modifier.fillMaxSize(), Alignment.Center) { CircularProgressIndicator() }
-                    searching -> SearchView(data.all, kind == "live", query, { query = it }, open)
-                    tab == 1 -> GuideView(api, data) { open(it) }
+                    tab == 3 -> SearchScreen(repo, openItem)
+                    tab == 4 -> HiddenScreen(repo)
+                    tab == 5 -> SettingsScreen(repo, scope, logout)
+                    vis == null -> LoadingView(repo, cacheLoaded) { scope.launch { repo.refreshContent(true) } }
+                    tab == 0 -> LiveView(
+                        repo, vis,
+                        onHide = { repo.hideItem("live", it) },
+                        onHideCat = { repo.toggleCat("live", it) }
+                    ) { ch, list, idx ->
+                        openItem("live", ch, list, idx)
+                    }
                     else -> Browse(
-                        data, kind, shown, heroInfo, now,
-                        onPlay = { shown?.let { open(it) } },
+                        vis, kind, shown, heroInfo,
+                        onPlay = { shown?.let { openItem(kind, it, emptyList(), 0) } },
                         onInfo = { showInfo = true },
                         onFocus = { focused = it },
-                        onOpen = open
+                        onOpen = { openItem(kind, it, emptyList(), 0) }
                     )
                 }
             }
@@ -241,21 +248,38 @@ fun Home(api: Xtream, logout: () -> Unit) {
         AlertDialog(
             onDismissRequest = { showInfo = false },
             confirmButton = { TextButton(onClick = { showInfo = false }) { Text("Fermer") } },
+            dismissButton = {
+                TextButton(onClick = { shown?.let { repo.hideItem(kind, it) }; showInfo = false; focused = null }) {
+                    Text(if (kind == "series") "Masquer cette série" else "Masquer ce film")
+                }
+            },
             title = { Text(shown?.name ?: "") },
             text = {
-                val meta = listOf(heroInfo?.year, heroInfo?.duration, heroInfo?.genre)
+                val meta = listOf(shown?.lang, heroInfo?.year, heroInfo?.duration, heroInfo?.genre)
                     .filter { !it.isNullOrBlank() }.joinToString("  •  ")
                 Text(meta + (if (meta.isNotEmpty()) "\n\n" else "") + (heroInfo?.plot?.ifBlank { "Pas de synopsis." } ?: "Chargement…"))
             }
         )
     }
-    if (showLogout) {
-        AlertDialog(
-            onDismissRequest = { showLogout = false },
-            confirmButton = { TextButton(onClick = { showLogout = false; logout() }) { Text("Se déconnecter") } },
-            dismissButton = { TextButton(onClick = { showLogout = false }) { Text("Annuler") } },
-            title = { Text("Changer de compte ?") }
-        )
+}
+
+@Composable
+fun LoadingView(repo: Repo, cacheLoaded: Boolean, onRetry: () -> Unit) {
+    Box(Modifier.fillMaxSize(), Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (repo.status.startsWith("Erreur")) {
+                Text(repo.status, color = TXT)
+                ActionButton("Réessayer", true, onRetry)
+            } else {
+                CircularProgressIndicator()
+                val msg = when {
+                    !cacheLoaded -> "Chargement…"
+                    repo.status.isBlank() -> "Chargement…"
+                    else -> repo.status + "\nLa première synchronisation peut prendre un moment, ensuite tout sera instantané."
+                }
+                Text(msg, color = MUTED, textAlign = TextAlign.Center)
+            }
+        }
     }
 }
 
@@ -282,11 +306,11 @@ fun Backdrop(url: String?) {
 }
 
 @Composable
-fun TopBar(tab: Int, onTab: (Int) -> Unit, onSearch: () -> Unit, onAccount: () -> Unit) {
+fun TopBar(tab: Int, onTab: (Int) -> Unit, status: String) {
     var time by remember { mutableStateOf(clock()) }
     LaunchedEffect(Unit) { while (true) { time = clock(); delay(20_000) } }
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 14.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text("Mon IPTV", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = TXT, modifier = Modifier.weight(1f))
@@ -297,10 +321,12 @@ fun TopBar(tab: Int, onTab: (Int) -> Unit, onSearch: () -> Unit, onAccount: () -
             TAB_NAMES.forEachIndexed { i, n -> Pill(n, tab == i) { onTab(i) } }
         }
         Row(Modifier.weight(1f), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-            Pill("Rechercher", false, onSearch)
-            Spacer(Modifier.width(4.dp))
-            Pill("Compte", false, onAccount)
-            Spacer(Modifier.width(12.dp))
+            if (status.isNotBlank()) {
+                Text(
+                    "↻ $status", fontSize = 11.sp, color = MUTED, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false).padding(end = 12.dp)
+                )
+            }
             Text(time, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TXT)
         }
     }
@@ -317,7 +343,7 @@ fun Pill(text: String, selected: Boolean, onClick: () -> Unit) {
             .background(if (selected) PILL else Color.Transparent)
             .border(2.dp, if (f) Color.White else Color.Transparent, CircleShape)
             .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 8.dp)
+            .padding(horizontal = 18.dp, vertical = 8.dp)
     )
 }
 
@@ -337,12 +363,12 @@ fun ActionButton(text: String, primary: Boolean, onClick: () -> Unit) {
     )
 }
 
+// ---------------------------------------------------------------- Films / Séries
 @Composable
 fun Browse(
-    data: Data, kind: String, item: Item?, info: Info?, now: String?,
+    data: Data, kind: String, item: Item?, info: Info?,
     onPlay: () -> Unit, onInfo: () -> Unit, onFocus: (Item) -> Unit, onOpen: (Item) -> Unit
 ) {
-    val live = kind == "live"
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxWidth(0.55f).height(210.dp).padding(start = 32.dp, top = 6.dp)) {
             Text(
@@ -350,7 +376,7 @@ fun Browse(
                 color = Color.White, maxLines = 2, overflow = TextOverflow.Ellipsis
             )
             val meta = listOfNotNull(
-                if (live) "En direct" else null,
+                item?.lang?.takeIf { it.isNotBlank() },
                 item?.rating?.takeIf { it.isNotBlank() && it != "0" && it != "0.0" }?.let { "★ $it" },
                 info?.year?.takeIf { it.isNotBlank() },
                 info?.duration?.takeIf { it.isNotBlank() },
@@ -359,12 +385,11 @@ fun Browse(
             Spacer(Modifier.height(6.dp))
             Text(meta.joinToString("  •  "), fontSize = 13.sp, color = MUTED, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.height(6.dp))
-            val syn = if (live) (now?.let { "Maintenant : $it" } ?: "") else info?.plot.orEmpty()
-            Text(syn, fontSize = 13.sp, lineHeight = 18.sp, color = MUTED, maxLines = 3, overflow = TextOverflow.Ellipsis)
+            Text(info?.plot.orEmpty(), fontSize = 13.sp, lineHeight = 18.sp, color = MUTED, maxLines = 3, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.weight(1f))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                ActionButton("▶ Lecture", true, onPlay)
-                if (!live) ActionButton("Plus d'infos", false, onInfo)
+                ActionButton(if (kind == "series") "▶ Épisodes" else "▶ Lecture", true, onPlay)
+                ActionButton("Plus d'infos", false, onInfo)
             }
             Spacer(Modifier.height(8.dp))
         }
@@ -379,7 +404,7 @@ fun Browse(
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(shelf.items) { it ->
-                        Poster(it, if (live) 1f else 2f / 3f, live, onFocus) { onOpen(it) }
+                        Poster(it, 2f / 3f, false, onFocus) { onOpen(it) }
                     }
                 }
             }
@@ -410,87 +435,274 @@ fun Poster(item: Item, ratio: Float, fit: Boolean, onFocus: (Item) -> Unit, onCl
                 modifier = Modifier.align(Alignment.Center).padding(6.dp)
             )
         }
+        if (!fit && item.lang.isNotBlank()) {
+            Text(
+                item.lang, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White,
+                modifier = Modifier.align(Alignment.TopStart).padding(8.dp)
+                    .background(langColor(item.lang), RoundedCornerShape(50))
+                    .padding(horizontal = 7.dp, vertical = 2.dp)
+            )
+        }
     }
 }
 
+// ---------------------------------------------------------------- TV en direct
 @Composable
-fun SearchView(all: List<Item>, live: Boolean, query: String, onQuery: (String) -> Unit, onOpen: (Item) -> Unit) {
-    val fr = remember { FocusRequester() }
-    LaunchedEffect(Unit) { fr.requestFocus() }
-    val res = remember(query, all) {
-        if (query.length < 2) emptyList() else all.filter { it.name.contains(query, ignoreCase = true) }.take(150)
-    }
-    Column(Modifier.fillMaxSize().padding(horizontal = 32.dp)) {
-        OutlinedTextField(
-            query, onQuery, singleLine = true, placeholder = { Text("Rechercher (2 lettres minimum)") },
-            modifier = Modifier.fillMaxWidth(0.5f).focusRequester(fr)
-        )
-        Spacer(Modifier.height(12.dp))
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(118.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            items(res) { it ->
-                Poster(it, if (live) 1f else 2f / 3f, live, {}) { onOpen(it) }
+fun LiveView(repo: Repo, data: Data, onHide: (Item) -> Unit, onHideCat: (Cat) -> Unit, onPlay: (Item, List<Item>, Int) -> Unit) {
+    val ev = repo.epgVersion
+    var catId by remember { mutableStateOf(data.cats.firstOrNull()?.id) }
+    var focusedCh by remember { mutableStateOf<Item?>(null) }
+    val list = remember(catId, data) { data.byCat[catId] ?: emptyList() }
+    Row(Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
+        LazyColumn(Modifier.width(200.dp).fillMaxHeight()) {
+            items(data.cats) { c -> FocusRow(c.name, c.id == catId, onFocus = { catId = c.id }) { catId = c.id } }
+        }
+        Spacer(Modifier.width(12.dp))
+        LazyColumn(Modifier.weight(1f).fillMaxHeight()) {
+            itemsIndexed(list) { idx, ch ->
+                ChannelRow(repo, ch, idx + 1, ev, onFocus = { focusedCh = ch }) { onPlay(ch, list, idx) }
             }
         }
-    }
-}
-
-@Composable
-fun GuideView(api: Xtream, data: Data, onPlay: (Item) -> Unit) {
-    var catId by remember { mutableStateOf(data.cats.firstOrNull()?.id) }
-    val list = remember(catId) { data.all.filter { it.cat == catId }.take(300) }
-    Column(Modifier.fillMaxSize()) {
-        LazyRow(contentPadding = PaddingValues(horizontal = 32.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            items(data.cats) { c -> Pill(c.name, c.id == catId) { catId = c.id } }
-        }
-        Spacer(Modifier.height(10.dp))
-        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 32.dp)) {
-            items(list) { ch -> GuideRow(api, ch) { onPlay(ch) } }
+        Spacer(Modifier.width(12.dp))
+        val cur = focusedCh ?: list.firstOrNull()
+        val curCat = data.cats.firstOrNull { it.id == catId }
+        ChannelPanel(repo, cur, curCat?.name, ev, Modifier.width(300.dp), onHideCat = {
+            curCat?.let { c ->
+                catId = data.cats.firstOrNull { it.id != c.id }?.id
+                focusedCh = null
+                onHideCat(c)
+            }
+        }) {
+            cur?.let { onHide(it) }
+            focusedCh = null
         }
     }
 }
 
 @Composable
-fun GuideRow(api: Xtream, ch: Item, onClick: () -> Unit) {
-    var progs by remember(ch.id) { mutableStateOf<List<Prog>>(emptyList()) }
-    LaunchedEffect(ch.id) { progs = api.epg(ch.id) }
+fun ChannelRow(repo: Repo, ch: Item, num: Int, ev: Int, onFocus: () -> Unit, onClick: () -> Unit) {
     var f by remember { mutableStateOf(false) }
-    val fmt = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+    var fb by remember(ch.id) { mutableStateOf<List<Prog>>(emptyList()) }
+    val cached = repo.progsFor(ch)
+    val progs = if (cached.isNotEmpty()) cached else fb
+    LaunchedEffect(ch.id, ev) {
+        if (repo.progsFor(ch).isEmpty()) {
+            delay(250)
+            fb = repo.api.epg(ch.id)
+        }
+    }
+    val nowS = System.currentTimeMillis() / 1000
+    val p = progs.firstOrNull()
+    val frac = if (p != null && p.stop > p.start) ((nowS - p.start).toFloat() / (p.stop - p.start)).coerceIn(0f, 1f) else 0f
     Row(
         Modifier.fillMaxWidth()
-            .onFocusChanged { f = it.isFocused }
+            .onFocusChanged { f = it.isFocused; if (it.isFocused) onFocus() }
             .background(if (f) Color(0x33FFFFFF) else Color.Transparent, RoundedCornerShape(8.dp))
             .clickable(onClick = onClick).padding(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        AsyncImage(model = ch.img, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.size(44.dp))
-        Spacer(Modifier.width(12.dp))
-        Text(ch.name, color = TXT, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.width(220.dp))
+        Text("$num", color = MUTED, fontSize = 13.sp, modifier = Modifier.width(36.dp))
+        AsyncImage(model = ch.img, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.size(40.dp))
+        Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
-            val p = progs.firstOrNull()
-            Text(
-                if (p != null) "${fmt.format(Date(p.start * 1000))}  ${p.title}" else "Programme indisponible",
-                color = TXT, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
-            )
-            progs.getOrNull(1)?.let {
-                Text("${fmt.format(Date(it.start * 1000))}  ${it.title}", color = MUTED, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(ch.name, color = TXT, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(p?.title ?: "Programme indisponible", color = MUTED, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (p != null) {
+                LinearProgressIndicator(progress = { frac }, modifier = Modifier.padding(top = 4.dp).fillMaxWidth().height(3.dp))
             }
         }
     }
 }
 
 @Composable
-fun FocusRow(text: String, onClick: () -> Unit) {
+fun ChannelPanel(repo: Repo, ch: Item?, catName: String?, ev: Int, modifier: Modifier, onHideCat: () -> Unit, onHide: () -> Unit) {
+    val fmt = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+    var fb by remember(ch?.id) { mutableStateOf<List<Prog>>(emptyList()) }
+    LaunchedEffect(ch?.id, ev) {
+        if (ch != null && repo.progsFor(ch).isEmpty()) {
+            delay(300)
+            fb = repo.api.epg(ch.id)
+        }
+    }
+    val cached = if (ch != null) repo.progsFor(ch) else emptyList()
+    val progs = if (cached.isNotEmpty()) cached else fb
+    Column(
+        modifier.fillMaxHeight().padding(vertical = 8.dp)
+            .background(Color(0xFF14141A), RoundedCornerShape(12.dp)).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        if (ch == null) {
+            Text("Aucune chaîne", color = MUTED)
+        } else {
+            AsyncImage(model = ch.img, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.size(72.dp))
+            Text(ch.name, color = TXT, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            progs.take(3).forEachIndexed { i, p ->
+                Text(if (i == 0) "Maintenant" else "Ensuite", color = ACCENT, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    "${fmt.format(Date(p.start * 1000))} – ${fmt.format(Date(p.stop * 1000))}   ${p.title}",
+                    color = TXT, fontSize = 13.sp, maxLines = 3, overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (progs.isEmpty()) Text("Programme indisponible", color = MUTED, fontSize = 13.sp)
+            Spacer(Modifier.weight(1f))
+            ActionButton("Masquer cette chaîne", false, onHide)
+            if (catName != null) ActionButton("Masquer la catégorie « $catName »", false, onHideCat)
+            Text("OK : regarder\nPendant la lecture : haut / bas pour changer de chaîne", color = MUTED, fontSize = 11.sp)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- Recherche
+@Composable
+fun SearchScreen(repo: Repo, open: (String, Item, List<Item>, Int) -> Unit) {
+    var q by remember { mutableStateOf("") }
+    var res by remember {
+        mutableStateOf(Triple<List<Item>, List<Item>, List<Item>>(emptyList(), emptyList(), emptyList()))
+    }
+    val fr = remember { FocusRequester() }
+    LaunchedEffect(Unit) { fr.requestFocus() }
+    LaunchedEffect(q) {
+        delay(200)
+        res = repo.search(q)
+    }
+    Column(Modifier.fillMaxSize()) {
+        OutlinedTextField(
+            q, { q = it }, singleLine = true,
+            placeholder = { Text("Rechercher une chaîne, un film, une série…") },
+            modifier = Modifier.padding(horizontal = 32.dp).fillMaxWidth(0.6f).focusRequester(fr)
+        )
+        LazyColumn(Modifier.fillMaxSize()) {
+            item { ResultRow("TV", res.first, true) { i, idx -> open("live", i, res.first, idx) } }
+            item { ResultRow("Films", res.second, false) { i, idx -> open("vod", i, res.second, idx) } }
+            item { ResultRow("Séries", res.third, false) { i, idx -> open("series", i, res.third, idx) } }
+        }
+    }
+}
+
+@Composable
+fun ResultRow(title: String, list: List<Item>, live: Boolean, onOpen: (Item, Int) -> Unit) {
+    if (list.isEmpty()) return
+    Text(
+        "$title (${list.size})", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = TXT,
+        modifier = Modifier.padding(start = 32.dp, top = 12.dp, bottom = 6.dp)
+    )
+    LazyRow(
+        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        itemsIndexed(list) { idx, it ->
+            Poster(it, if (live) 1f else 2f / 3f, live, {}) { onOpen(it, idx) }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- Masqués
+@Composable
+fun HiddenScreen(repo: Repo) {
+    val hv = repo.hiddenVersion
+    var kind by remember { mutableStateOf("live") }
+    var kw by remember { mutableStateOf("") }
+    var msg by remember { mutableStateOf("") }
+    val cats = repo.data[kind]?.cats ?: emptyList()
+    val hiddenList = repo.hiddenItems.entries.filter { it.key.startsWith("$kind:") }.map { it.key to it.value }
+    Column(Modifier.fillMaxSize().padding(horizontal = 32.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("live" to "TV", "vod" to "Films", "series" to "Séries").forEach { (k, l) ->
+                Pill(l, kind == k) { kind = k }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                kw, { kw = it }, singleLine = true,
+                placeholder = { Text("Mot du nom : DAZN, TURK, TR…") },
+                modifier = Modifier.width(300.dp)
+            )
+            ActionButton("Masquer ces catégories", true) { msg = "${repo.hideCatsMatching(kind, kw)} catégorie(s) masquée(s)" }
+            ActionButton("Réafficher", false) { msg = "${repo.showCatsMatching(kind, kw)} catégorie(s) réaffichée(s)" }
+        }
+        if (msg.isNotBlank()) Text(msg, fontSize = 13.sp, color = ACCENT)
+        Spacer(Modifier.height(6.dp))
+        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+            Column(Modifier.weight(1f)) {
+                Text("Catégories (OK pour masquer ou afficher)", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = TXT)
+                Spacer(Modifier.height(6.dp))
+                LazyColumn {
+                    items(cats) { c ->
+                        val h = repo.isCatHidden(kind, c.id)
+                        FocusRow((if (h) "✕  " else "✓  ") + c.name, h) { repo.toggleCat(kind, c) }
+                    }
+                }
+            }
+            Column(Modifier.weight(1f)) {
+                Text("Éléments masqués (OK pour réafficher)", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = TXT)
+                Spacer(Modifier.height(6.dp))
+                if (hiddenList.isEmpty() && hv >= 0) {
+                    Text(
+                        "Aucun pour l'instant. Pour masquer : « Plus d'infos » sur un film ou une série, ou le bouton « Masquer cette chaîne » dans l'onglet TV.",
+                        fontSize = 13.sp, color = MUTED
+                    )
+                }
+                LazyColumn {
+                    items(hiddenList) { (key, name) -> FocusRow(name) { repo.showItem(key) } }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- Réglages
+@Composable
+fun SettingsScreen(repo: Repo, scope: CoroutineScope, logout: () -> Unit) {
+    var confirm by remember { mutableStateOf(false) }
+    val opts = listOf(1 to "Chaque jour", 3 to "Tous les 3 jours", 7 to "Chaque semaine", 30 to "Chaque mois")
+    Column(
+        Modifier.fillMaxSize().padding(horizontal = 32.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text("Réglages", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = TXT)
+        Text("Contenu (chaînes, films, séries)", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = TXT)
+        Text("Dernière mise à jour : ${fmtDate(repo.lastContentTs)}", fontSize = 13.sp, color = MUTED)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            opts.forEach { (d, l) -> Pill(l, repo.freqContent == d) { repo.setFreqContent(d) } }
+        }
+        ActionButton("Mettre à jour maintenant", false) { scope.launch { repo.refreshContent(true) } }
+        Spacer(Modifier.height(8.dp))
+        Text("Guide TV (programmes)", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = TXT)
+        Text("Dernière mise à jour : ${fmtDate(repo.lastEpgTs)}", fontSize = 13.sp, color = MUTED)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            opts.forEach { (d, l) -> Pill(l, repo.freqEpg == d) { repo.setFreqEpg(d) } }
+        }
+        ActionButton("Mettre à jour le guide maintenant", false) { scope.launch { repo.syncEpg() } }
+        Text(
+            "Les mises à jour se font à l'ouverture de l'appli, quand le délai choisi est dépassé.",
+            fontSize = 12.sp, color = MUTED
+        )
+        if (repo.status.isNotBlank()) Text(repo.status, fontSize = 13.sp, color = ACCENT)
+        Spacer(Modifier.height(8.dp))
+        ActionButton("Changer de compte", false) { confirm = true }
+    }
+    if (confirm) {
+        AlertDialog(
+            onDismissRequest = { confirm = false },
+            confirmButton = { TextButton(onClick = { confirm = false; logout() }) { Text("Se déconnecter") } },
+            dismissButton = { TextButton(onClick = { confirm = false }) { Text("Annuler") } },
+            title = { Text("Changer de compte ?") },
+            text = { Text("Les données enregistrées seront effacées et rechargées avec le nouveau compte.") }
+        )
+    }
+}
+
+@Composable
+fun FocusRow(text: String, selected: Boolean = false, onFocus: (() -> Unit)? = null, onClick: () -> Unit) {
     var f by remember { mutableStateOf(false) }
     Text(
-        text, maxLines = 1, overflow = TextOverflow.Ellipsis, color = TXT, fontSize = 16.sp,
+        text, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        color = if (selected) ACCENT else TXT, fontSize = 15.sp,
         modifier = Modifier.fillMaxWidth()
-            .onFocusChanged { f = it.isFocused }
+            .onFocusChanged { f = it.isFocused; if (it.isFocused) onFocus?.invoke() }
             .background(if (f) Color(0x44FFFFFF) else Color.Transparent, RoundedCornerShape(6.dp))
             .clickable(onClick = onClick)
-            .padding(12.dp)
+            .padding(10.dp)
     )
 }

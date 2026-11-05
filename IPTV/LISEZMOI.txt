@@ -20,3 +20,7 @@ Le depot doit etre PUBLIC. A chaque build, l'APK est publie dans l'onglet "Relea
 Dans Downloader, tape ce lien (remplace TONPSEUDO et TONDEPOT) :
 https://github.com/TONPSEUDO/TONDEPOT/releases/latest/download/app-debug.apk
 Le lien reste le meme a chaque mise a jour : il donne toujours la derniere version.
+
+VERSION 1.2 : synchronisation unique puis navigation instantanee (cache sur la TV), vraie interface TV
+(categories / chaines / guide), recherche separee TV-Films-Series, pastille de langue sur les films,
+reglages de mise a jour (chaque jour / 3 jours / semaine / mois) pour le contenu et le guide TV.

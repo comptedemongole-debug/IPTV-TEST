@@ -117,6 +117,19 @@ class Repo(private val ctx: Context, val api: Xtream) {
     var tmdbKey by mutableStateOf(prefs.getString("tmdb_key", null) ?: readAssetKey())
         private set
 
+    var perf by mutableStateOf(prefs.getBoolean("perf", false))
+        private set
+    var autoBoost by mutableStateOf(prefs.getBoolean("auto_boost", true))
+        private set
+
+    var autoNext by mutableStateOf(prefs.getBoolean("auto_next", false))
+        private set
+
+    fun updateAutoNext(b: Boolean) { autoNext = b; prefs.edit().putBoolean("auto_next", b).apply() }
+
+    fun updatePerf(b: Boolean) { perf = b; prefs.edit().putBoolean("perf", b).apply() }
+    fun updateAutoBoost(b: Boolean) { autoBoost = b; prefs.edit().putBoolean("auto_boost", b).apply() }
+
     private fun readAssetKey(): String = try {
         ctx.assets.open("tmdb_key.txt").bufferedReader().use { it.readText().trim() }
     } catch (e: Exception) {
@@ -194,21 +207,25 @@ class Repo(private val ctx: Context, val api: Xtream) {
     }
 
     suspend fun loadCache() {
-        val loaded = withContext(Dispatchers.IO) {
-            val m = HashMap<String, Data>()
-            for (k in listOf("vod", "series", "live")) {
-                try { readCache(k)?.let { m[k] = it } } catch (e: Exception) { /* cache illisible : on resynchronise */ }
-            }
-            m
-        }
-        data.putAll(loaded)
+        // petits fichiers d'abord, puis le contenu : Films s'affiche dès qu'il est lu, sans attendre le reste
         loadHidden()
         loadFavs()
         loadResume()
+        for (k in listOf("vod", "series", "live")) {
+            val d = withContext(Dispatchers.IO) {
+                try { readCache(k) } catch (e: Exception) { null }
+            }
+            if (d != null) data[k] = d
+        }
         val e = withContext(Dispatchers.IO) { try { readEpg() } catch (e: Exception) { emptyMap() } }
         epg = e
         epgVersion++
     }
+
+    /** Numéro du jour (calendrier local) : on se met à jour à la première ouverture d'un nouveau jour. */
+    private fun dayNum(ms: Long): Long = (ms + java.util.TimeZone.getDefault().getOffset(ms)) / 86_400_000L
+
+    private fun daysSince(ms: Long): Long = dayNum(System.currentTimeMillis()) - dayNum(ms)
 
     // ---------------- synchronisation du contenu ----------------
     private suspend fun sync(kind: String) {
@@ -235,7 +252,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
         try {
             for (k in listOf("vod", "series", "live")) {
                 val last = prefs.getLong("sync_$k", 0L)
-                val due = data[k] == null || force || System.currentTimeMillis() - last > freqContent * 86_400_000L
+                val due = data[k] == null || force || daysSince(last) >= freqContent
                 if (due) {
                     try {
                         sync(k)
@@ -356,7 +373,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
     suspend fun syncEpgIfDue() {
         val last = prefs.getLong("epg_ts", 0L)
         val age = System.currentTimeMillis() - last
-        val due = age > freqEpg * 86_400_000L || (epg.isEmpty() && age > 6 * 3_600_000L)
+        val due = daysSince(last) >= freqEpg || (epg.isEmpty() && age > 6 * 3_600_000L)
         if (due) syncEpg()
     }
 

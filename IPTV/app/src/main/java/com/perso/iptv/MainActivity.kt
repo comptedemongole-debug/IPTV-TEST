@@ -9,6 +9,8 @@ import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.RepeatMode
@@ -28,7 +30,11 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Dp
+import coil.imageLoader
 import coil.request.ImageRequest
+import android.provider.Settings
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -37,6 +43,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
@@ -79,6 +86,21 @@ private val MUTED = Color(0xFFC9C9D2)
 private val ACCENT = Color(0xFFE5484D)
 private val PILL = Color(0xFF34343F)
 
+val LocalPerf = compositionLocalOf { false }
+
+private val rTmdbSize = Regex("/t/p/[^/]+/")
+
+/** Réduit la taille des images TMDB (souvent en pleine résolution) : beaucoup moins à télécharger et à décoder. */
+private fun lightImg(url: String?, size: String): String? =
+    if (url != null && url.contains("image.tmdb.org/t/p/")) rTmdbSize.replace(url, "/t/p/$size/") else url
+
+private fun openSystem(ctx: Context, action: String): Boolean = try {
+    ctx.startActivity(Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    true
+} catch (e: Exception) {
+    false
+}
+
 private val TAB_NAMES = listOf("TV", "Films", "Séries", "Recherche", "Masqués", "Réglages")
 
 private fun clock(): String = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
@@ -89,11 +111,22 @@ private fun play(
     ctx: Context, url: String, title: String, live: Boolean,
     img: String? = null, kind: String = "vod", start: Long = 0L
 ) {
+    if (kind != "series") Zap.eps = emptyList()
     ctx.startActivity(
         Intent(ctx, PlayerActivity::class.java)
             .putExtra("url", url).putExtra("title", title).putExtra("live", live)
             .putExtra("img", img).putExtra("kind", kind).putExtra("start", start)
     )
+}
+
+private fun setZapEpisodes(api: Xtream, series: Item, list: List<Ep>, current: Ep, tm: Map<String, Map<Int, TmEp>>) {
+    Zap.eps = list.map { e ->
+        val num = e.num.ifBlank { "?" }
+        val tmName = tm[e.season]?.get(e.num.toIntOrNull() ?: -1)?.name
+        val name = if (!tmName.isNullOrBlank()) tmName else cleanEpTitle(e.title, series.name, e.num)
+        EpEntry(api.epUrl(e.id, e.ext), "S${e.season} E$num · $name", "${series.name} · S${e.season} E$num", e.img ?: series.img)
+    }
+    Zap.epIndex = list.indexOf(current).coerceAtLeast(0)
 }
 
 private fun fmtMs(ms: Long): String {
@@ -238,6 +271,7 @@ fun Home(api: Xtream, logout: () -> Unit) {
         try {
             Zap.repo = repo
             Zap.api = api
+            launch(Dispatchers.IO) { if (repo.autoBoost) Booster.boost(ctx.applicationContext) }
             repo.loadCache()
             cacheLoaded = true
             repo.refreshContent(false)
@@ -255,8 +289,12 @@ fun Home(api: Xtream, logout: () -> Unit) {
 
     val pageAlpha = remember { Animatable(1f) }
     LaunchedEffect(tab) {
-        pageAlpha.snapTo(0f)
-        pageAlpha.animateTo(1f, tween(350))
+        if (repo.perf) {
+            pageAlpha.snapTo(1f)
+        } else {
+            pageAlpha.snapTo(0f)
+            pageAlpha.animateTo(1f, tween(350))
+        }
     }
     val hero = remember(kind) { HeroState() }
     if (tab == 1 || tab == 2) {
@@ -273,6 +311,7 @@ fun Home(api: Xtream, logout: () -> Unit) {
         }
     }
 
+    CompositionLocalProvider(LocalPerf provides repo.perf) {
     val det = detail
     if (det != null) {
         DetailScreen(repo, api, det.first, det.second, onBack = { detail = null }) { url, title, img, k, start ->
@@ -323,7 +362,7 @@ fun Home(api: Xtream, logout: () -> Unit) {
             }
         }
     }
-
+    }
 }
 
 @Composable
@@ -350,12 +389,13 @@ fun LoadingView(repo: Repo, cacheLoaded: Boolean, onRetry: () -> Unit) {
 
 @Composable
 fun Backdrop(url: String?) {
+    val perf = LocalPerf.current
     Box(Modifier.fillMaxSize()) {
-        Crossfade(targetState = url, animationSpec = tween(400), label = "backdrop") { u ->
+        Crossfade(targetState = if (perf) null else url, animationSpec = tween(400), label = "backdrop") { u ->
             Box(Modifier.fillMaxSize()) {
                 if (u != null) {
                     AsyncImage(
-                        model = ImageRequest.Builder(LocalContext.current).data(u).size(1280, 720).build(),
+                        model = ImageRequest.Builder(LocalContext.current).data(lightImg(u, "w780")).size(1280, 720).build(),
                         contentDescription = null, contentScale = ContentScale.Crop,
                         modifier = Modifier.align(Alignment.TopEnd).fillMaxWidth(0.8f).fillMaxHeight(0.72f)
                     )
@@ -475,13 +515,17 @@ fun HeroBackdrop(hero: HeroState) {
 }
 
 @Composable
-fun HeroPanel(hero: HeroState, kind: String, onPlay: (Item) -> Unit, onInfo: (Item) -> Unit) {
+fun HeroPanel(hero: HeroState, kind: String, focus: FocusRequester, onPlay: (Item) -> Unit, onInfo: (Item) -> Unit) {
+    val perf = LocalPerf.current
     val item = hero.shown
     val info = hero.info
     Column(Modifier.fillMaxWidth(0.6f).height(230.dp).padding(start = 32.dp, top = 6.dp)) {
         AnimatedContent(
             targetState = item?.id,
-            transitionSpec = { fadeIn(tween(300)) togetherWith fadeOut(tween(150)) },
+            transitionSpec = {
+                if (perf) EnterTransition.None togetherWith ExitTransition.None
+                else fadeIn(tween(300)) togetherWith fadeOut(tween(150))
+            },
             label = "hero"
         ) { _ ->
             Column {
@@ -512,7 +556,9 @@ fun HeroPanel(hero: HeroState, kind: String, onPlay: (Item) -> Unit, onInfo: (It
         }
         Spacer(Modifier.weight(1f))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            ActionButton(if (kind == "series") "▶ Épisodes" else "▶ Lecture", true) { item?.let(onPlay) }
+            Box(Modifier.focusRequester(focus)) {
+                ActionButton(if (kind == "series") "▶ Épisodes" else "▶ Lecture", true) { item?.let(onPlay) }
+            }
             ActionButton("Plus d'infos", false) { item?.let(onInfo) }
         }
         Spacer(Modifier.height(8.dp))
@@ -528,9 +574,20 @@ fun Browse(
 ) {
     val top = remember(data) { data.rows.firstOrNull()?.items?.take(10) ?: emptyList() }
     val onFocus: (Item) -> Unit = remember(hero) { { i: Item -> hero.item = i } }
+    val listState = rememberLazyListState()
+    val heroFocus = remember { FocusRequester() }
+    val scope = rememberCoroutineScope()
+    val atTop by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0 } }
+    // Touche Retour : remonte tout en haut de la page (au lieu de quitter)
+    BackHandler(enabled = !atTop) {
+        scope.launch {
+            listState.scrollToItem(0)
+            try { heroFocus.requestFocus() } catch (e: Exception) { /* ignoré */ }
+        }
+    }
     Column(Modifier.fillMaxSize()) {
-        HeroPanel(hero, kind, onPlay, onInfo)
-        LazyColumn(Modifier.fillMaxSize()) {
+        HeroPanel(hero, kind, heroFocus, onPlay, onInfo)
+        LazyColumn(Modifier.fillMaxSize(), state = listState) {
             if (resumes.isNotEmpty()) {
                 item {
                     Text(
@@ -607,9 +664,13 @@ fun Browse(
 @Composable
 fun Poster(item: Item, ratio: Float, fit: Boolean, onFocus: (Item) -> Unit, progress: Float = -1f, onClick: () -> Unit) {
     var f by remember { mutableStateOf(false) }
-    val sc = animateFloatAsState(if (f) 1.1f else 1f, tween(180), label = "scale")
+    val perf = LocalPerf.current
+    val sc = animateFloatAsState(if (f && !perf) 1.1f else 1f, tween(180), label = "scale")
     val pctx = LocalContext.current
-    val req = remember(item.img) { ImageRequest.Builder(pctx).data(item.img).size(300, 450).crossfade(150).build() }
+    val req = remember(item.img, perf) {
+        ImageRequest.Builder(pctx).data(lightImg(item.img, if (perf) "w185" else "w342"))
+            .size(if (perf) 220 else 300, if (perf) 330 else 450).crossfade(if (perf) 0 else 150).build()
+    }
     Box(
         Modifier.width(124.dp).graphicsLayer { scaleX = sc.value; scaleY = sc.value }
             .onFocusChanged { f = it.isFocused; if (it.isFocused) onFocus(item) }
@@ -756,6 +817,7 @@ fun DetailScreen(
                     } else {
                         eps?.firstOrNull()?.let { e1 ->
                             ActionButton("▶ Lecture S${e1.season} E${e1.num.ifBlank { "1" }}", true) {
+                                eps?.let { setZapEpisodes(api, item, it, e1, tm) }
                                 onPlay(
                                     api.epUrl(e1.id, e1.ext),
                                     "${item.name} · S${e1.season} E${e1.num.ifBlank { "1" }}",
@@ -792,7 +854,10 @@ fun DetailScreen(
                     Spacer(Modifier.height(8.dp))
                     LazyColumn(Modifier.fillMaxSize()) {
                         items(list.filter { it.season == sSel }) { ep ->
-                            EpisodeRow(repo, api, item, ep, tm[sSel]?.get(ep.num.toIntOrNull() ?: -1), onPlay)
+                            EpisodeRow(repo, api, item, ep, tm[sSel]?.get(ep.num.toIntOrNull() ?: -1)) { u, t, i, k, st ->
+                                setZapEpisodes(api, item, list, ep, tm)
+                                onPlay(u, t, i, k, st)
+                            }
                         }
                     }
                 }
@@ -1109,6 +1174,63 @@ fun SettingsScreen(repo: Repo, scope: CoroutineScope, logout: () -> Unit) {
         ActionButton("Mettre à jour le guide maintenant", false) { scope.launch { repo.syncEpg() } }
         Text(
             "Les mises à jour se font à l'ouverture de l'appli, quand le délai choisi est dépassé.",
+            fontSize = 12.sp, color = MUTED
+        )
+        Spacer(Modifier.height(8.dp))
+        Text("Performance de la TV", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = TXT)
+        val appCtx = LocalContext.current.applicationContext
+        var sys by remember { mutableStateOf(Booster.info(appCtx)) }
+        var perfMsg by remember { mutableStateOf("") }
+        Text(
+            "Mémoire libre : ${sys.freeRamMb} Mo sur ${sys.totalRamMb} Mo   ·   Stockage libre : ${sys.freeStorageMb / 1024} Go sur ${sys.totalStorageMb / 1024} Go",
+            fontSize = 13.sp, color = MUTED
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            ActionButton("Libérer la mémoire maintenant", false) {
+                scope.launch {
+                    val gain = withContext(Dispatchers.IO) { Booster.boost(appCtx) }
+                    sys = Booster.info(appCtx)
+                    perfMsg = "Mémoire libérée : ${if (gain > 0) gain else 0} Mo"
+                }
+            }
+            ActionButton("Vider le cache des images", false) {
+                scope.launch {
+                    withContext(Dispatchers.IO) {
+                        appCtx.imageLoader.memoryCache?.clear()
+                        appCtx.imageLoader.diskCache?.clear()
+                    }
+                    perfMsg = "Cache des images vidé"
+                }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Pill((if (repo.autoBoost) "✓ " else "✕ ") + "Libérer la mémoire à chaque ouverture", repo.autoBoost) {
+                repo.updateAutoBoost(!repo.autoBoost)
+            }
+            Pill((if (repo.perf) "✓ " else "✕ ") + "Mode performance", repo.perf) { repo.updatePerf(!repo.perf) }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Pill((if (repo.autoNext) "✓ " else "✕ ") + "Enchaîner les épisodes automatiquement", repo.autoNext) {
+                repo.updateAutoNext(!repo.autoNext)
+            }
+        }
+        Text(
+            "Mode performance : pas d'images de fond ni d'animations, affiches plus légères. À activer si ça rame encore.",
+            fontSize = 12.sp, color = MUTED
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            ActionButton("Applications de la TV", false) {
+                if (!openSystem(appCtx, Settings.ACTION_APPLICATION_SETTINGS)) perfMsg = "Impossible d'ouvrir ce réglage sur cette TV"
+            }
+            ActionButton("Options pour les développeurs", false) {
+                if (!openSystem(appCtx, Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)) {
+                    perfMsg = "Active d'abord le mode développeur : Paramètres, Système, À propos, 7 clics sur « Build »"
+                }
+            }
+        }
+        if (perfMsg.isNotBlank()) Text(perfMsg, fontSize = 13.sp, color = ACCENT)
+        Text(
+            "Pour aller plus loin : désactive les applis inutiles dans « Applications », puis dans les options pour les développeurs mets les échelles d'animation sur 0,5x ou désactivées.",
             fontSize = 12.sp, color = MUTED
         )
         Spacer(Modifier.height(8.dp))

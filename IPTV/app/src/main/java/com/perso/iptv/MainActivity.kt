@@ -32,6 +32,13 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Dp
 import coil.imageLoader
 import coil.request.ImageRequest
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
 import android.provider.Settings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -101,7 +108,7 @@ private fun openSystem(ctx: Context, action: String): Boolean = try {
     false
 }
 
-private val TAB_NAMES = listOf("TV", "Films", "Séries", "Recherche", "Masqués", "Réglages")
+private val TAB_ORDER = listOf(0 to "TV", 1 to "Films", 2 to "Séries", 6 to "Playlists", 4 to "Masqués", 5 to "Réglages")
 
 private fun clock(): String = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
 private fun fmtDate(ts: Long): String =
@@ -109,13 +116,15 @@ private fun fmtDate(ts: Long): String =
 
 private fun play(
     ctx: Context, url: String, title: String, live: Boolean,
-    img: String? = null, kind: String = "vod", start: Long = 0L
+    img: String? = null, kind: String = "vod", start: Long = 0L, handoffId: String? = null
 ) {
     if (kind != "series") Zap.eps = emptyList()
+    // sans transmission, on libère l'aperçu avant de lancer (une seule connexion chez le fournisseur)
+    if (handoffId == null) Preview.release()
     ctx.startActivity(
         Intent(ctx, PlayerActivity::class.java)
             .putExtra("url", url).putExtra("title", title).putExtra("live", live)
-            .putExtra("img", img).putExtra("kind", kind).putExtra("start", start)
+            .putExtra("img", img).putExtra("kind", kind).putExtra("start", start).putExtra("handoffId", handoffId)
     )
 }
 
@@ -124,9 +133,23 @@ private fun setZapEpisodes(api: Xtream, series: Item, list: List<Ep>, current: E
         val num = e.num.ifBlank { "?" }
         val tmName = tm[e.season]?.get(e.num.toIntOrNull() ?: -1)?.name
         val name = if (!tmName.isNullOrBlank()) tmName else cleanEpTitle(e.title, series.name, e.num)
-        EpEntry(api.epUrl(e.id, e.ext), "S${e.season} E$num · $name", "${series.name} · S${e.season} E$num", e.img ?: series.img)
+        EpEntry(api.epUrl(e.id, e.ext), "S${e.season} E$num · $name", "${series.name} · S${e.season} E$num", e.img ?: series.img, e.season)
     }
     Zap.epIndex = list.indexOf(current).coerceAtLeast(0)
+}
+
+private fun setVodQueue(repo: Repo, item: Item) {
+    val list = repo.data["vod"]?.byCat?.get(item.cat)?.take(500) ?: emptyList()
+    val i = list.indexOfFirst { it.id == item.id }
+    if (i >= 0) {
+        Zap.vodQueue = list
+        Zap.vodIndex = i
+    } else {
+        Zap.vodQueue = listOf(item)
+        Zap.vodIndex = 0
+    }
+    Zap.queueIsPlaylist = false
+    Zap.queueName = null
 }
 
 private fun fmtMs(ms: Long): String {
@@ -176,6 +199,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onStop() {
+        if (!Preview.lent) Preview.release()
+        super.onStop()
     }
 }
 
@@ -260,7 +288,7 @@ fun Login(onOk: (String, String, String) -> Unit) {
 fun Home(api: Xtream, logout: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
-    val repo = remember(api) { Repo(ctx.applicationContext, api) }
+    val repo = remember(api) { Repo.obtain(ctx.applicationContext, api) }
     var tab by remember { mutableStateOf(1) }
     var cacheLoaded by remember { mutableStateOf(false) }
     var detail by remember { mutableStateOf<Pair<String, Item>?>(null) }
@@ -271,10 +299,15 @@ fun Home(api: Xtream, logout: () -> Unit) {
         try {
             Zap.repo = repo
             Zap.api = api
-            launch(Dispatchers.IO) { if (repo.autoBoost) Booster.boost(ctx.applicationContext) }
+            launch(Dispatchers.IO) {
+                delay(4000)
+                if (repo.autoBoost) Booster.boost(ctx.applicationContext)
+            }
             repo.loadCache()
             cacheLoaded = true
+            val fullJob = launch { repo.loadFull() }
             repo.refreshContent(false)
+            fullJob.join()
             repo.syncEpgIfDue()
         } catch (e: CancellationException) {
             throw e
@@ -285,7 +318,10 @@ fun Home(api: Xtream, logout: () -> Unit) {
 
     val kind = when (tab) { 0 -> "live"; 1 -> "vod"; 2 -> "series"; else -> "" }
     val data = if (kind.isEmpty()) null else repo.data[kind]
-    val vis = data?.let { d -> remember(d, repo.hiddenVersion) { repo.visible(kind, d) } }
+    val visPair by produceState(Pair(kind, data), kind, data, repo.hiddenVersion) {
+        value = Pair(kind, if (data == null) null else withContext(Dispatchers.Default) { repo.visible(kind, data) })
+    }
+    val vis = if (visPair.first == kind && visPair.second != null) visPair.second else data
 
     val pageAlpha = remember { Animatable(1f) }
     LaunchedEffect(tab) {
@@ -306,7 +342,8 @@ fun Home(api: Xtream, logout: () -> Unit) {
             "series", "vod" -> detail = k to item
             else -> {
                 Zap.items = sib; Zap.index = idx; Zap.api = api; Zap.repo = repo
-                play(ctx, api.liveUrl(item.id), item.name, true, item.img, "live", 0L)
+                val handoff = Preview.player != null && Preview.item?.id == item.id
+                play(ctx, api.liveUrl(item.id), item.name, true, item.img, "live", 0L, if (handoff) item.id else null)
             }
         }
     }
@@ -326,6 +363,17 @@ fun Home(api: Xtream, logout: () -> Unit) {
                 when {
                     tab == 3 -> SearchScreen(repo, openItem)
                     tab == 4 -> HiddenScreen(repo)
+                    tab == 6 -> PlaylistsScreen(repo) { pl, idx ->
+                        val m = pl.items.getOrNull(idx)
+                        if (m != null) {
+                            Zap.vodQueue = pl.items
+                            Zap.vodIndex = idx
+                            Zap.queueIsPlaylist = true
+                            Zap.queueName = pl.name
+                            val u = api.vodUrl(m.id, m.ext)
+                            play(ctx, u, m.name, false, m.img, "vod", repo.resumeFor(u)?.pos ?: 0L)
+                        }
+                    }
                     tab == 5 -> SettingsScreen(repo, scope, logout)
                     vis == null -> LoadingView(repo, cacheLoaded) { scope.launch { repo.refreshContent(true) } }
                     vis.cats.isEmpty() -> Box(Modifier.fillMaxSize(), Alignment.Center) {
@@ -347,6 +395,7 @@ fun Home(api: Xtream, logout: () -> Unit) {
                         resumes = repo.resumes.filter { it.kind == kind },
                         onPlay = { sh ->
                             if (kind == "vod") {
+                                setVodQueue(repo, sh)
                                 val u = api.vodUrl(sh.id, sh.ext)
                                 play(ctx, u, sh.name, false, sh.img, "vod", repo.resumeFor(u)?.pos ?: 0L)
                             } else {
@@ -354,7 +403,10 @@ fun Home(api: Xtream, logout: () -> Unit) {
                             }
                         },
                         onInfo = { sh -> detail = kind to sh },
-                        onResume = { r -> play(ctx, r.url, r.title, false, r.img, r.kind, r.pos) },
+                        onResume = { r ->
+                            if (r.kind == "vod") Zap.vodQueue = emptyList()
+                            play(ctx, r.url, r.title, false, r.img, r.kind, r.pos)
+                        },
                         onOpen = { openItem(kind, it, emptyList(), 0) }
                     )
                 }
@@ -432,7 +484,7 @@ fun TopBar(tab: Int, onTab: (Int) -> Unit, status: String) {
             Modifier.background(BG.copy(alpha = 0.8f), CircleShape)
                 .border(1.dp, Color(0xFF3A3A45), CircleShape).padding(4.dp)
         ) {
-            TAB_NAMES.forEachIndexed { i, n -> Pill(n, tab == i) { onTab(i) } }
+            TAB_ORDER.forEach { (i, n) -> Pill(n, tab == i) { onTab(i) } }
         }
         Row(Modifier.weight(1f), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
             if (status.isNotBlank()) {
@@ -441,6 +493,8 @@ fun TopBar(tab: Int, onTab: (Int) -> Unit, status: String) {
                     modifier = Modifier.weight(1f, fill = false).padding(end = 12.dp)
                 )
             }
+            SearchPill(tab == 3) { onTab(3) }
+            Spacer(Modifier.width(12.dp))
             Text(time, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TXT)
         }
     }
@@ -755,6 +809,12 @@ fun DetailScreen(
     val plot = (inf?.plot ?: "").ifBlank { item.plot }.ifBlank { tmMv?.overview ?: "" }
     val backdrop = inf?.backdrop ?: item.backdrop ?: tmMv?.backdrop ?: item.img
     val vodUrl = api.vodUrl(item.id, item.ext)
+    val playVod: (Long) -> Unit = { st ->
+        setVodQueue(repo, item)
+        onPlay(vodUrl, item.name, item.img, "vod", st)
+    }
+    var showAdd by remember(item.id) { mutableStateOf(false) }
+    if (showAdd) AddToPlaylistDialog(repo, item) { showAdd = false }
     val resume = if (kind == "vod") repo.resumeFor(vodUrl) else null
     val fav = repo.isFav(kind, item)
     val meta = listOfNotNull(
@@ -808,11 +868,11 @@ fun DetailScreen(
                     if (kind == "vod") {
                         if (resume != null) {
                             ActionButton("▶ Reprendre à ${fmtMs(resume.pos)}", true) {
-                                onPlay(vodUrl, item.name, item.img, "vod", resume.pos)
+                                playVod(resume.pos)
                             }
-                            ActionButton("Depuis le début", false) { onPlay(vodUrl, item.name, item.img, "vod", 0L) }
+                            ActionButton("Depuis le début", false) { playVod(0L) }
                         } else {
-                            ActionButton("▶ Lecture", true) { onPlay(vodUrl, item.name, item.img, "vod", 0L) }
+                            ActionButton("▶ Lecture", true) { playVod(0L) }
                         }
                     } else {
                         eps?.firstOrNull()?.let { e1 ->
@@ -827,7 +887,11 @@ fun DetailScreen(
                             }
                         }
                     }
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     ActionButton(if (fav) "✓ Dans ma liste" else "+ Ma liste", false) { repo.toggleFav(kind, item) }
+                    if (kind == "vod") ActionButton("+ Playlist", false) { showAdd = true }
                     ActionButton("Masquer", false) { repo.hideItem(kind, item); onBack() }
                 }
             }
@@ -910,11 +974,21 @@ fun EpisodeRow(
 @Composable
 fun LiveView(repo: Repo, data: Data, onHide: (Item) -> Unit, onHideCat: (Cat) -> Unit, onPlay: (Item, List<Item>, Int) -> Unit) {
     val ev = repo.epgVersion
+    val appCtx = LocalContext.current.applicationContext
     var catId by remember { mutableStateOf(data.cats.firstOrNull()?.id) }
     var focusedCh by remember { mutableStateOf<Item?>(null) }
     val favList = repo.favItems("live")
     val cats = if (favList.isNotEmpty()) listOf(Cat("__fav", "★ Favoris")) + data.cats else data.cats
     val list = if (catId == "__fav") favList else (data.byCat[catId] ?: emptyList())
+    val pItem = Preview.item
+    // on quitte l'onglet TV : on coupe l'aperçu (sauf s'il est en plein écran)
+    DisposableEffect(Unit) { onDispose { if (!Preview.lent) Preview.release() } }
+    val openFull: () -> Unit = {
+        if (pItem != null) {
+            val i = list.indexOfFirst { it.id == pItem.id }
+            if (i >= 0) onPlay(pItem, list, i) else onPlay(pItem, listOf(pItem), 0)
+        }
+    }
     Row(Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
         LazyColumn(Modifier.width(200.dp).fillMaxHeight()) {
             items(cats) { c -> FocusRow(c.name, c.id == catId, onFocus = { catId = c.id }) { catId = c.id } }
@@ -922,19 +996,26 @@ fun LiveView(repo: Repo, data: Data, onHide: (Item) -> Unit, onHideCat: (Cat) ->
         Spacer(Modifier.width(12.dp))
         LazyColumn(Modifier.weight(1f).fillMaxHeight()) {
             itemsIndexed(list) { idx, ch ->
-                ChannelRow(repo, ch, idx + 1, ev, onFocus = { focusedCh = ch }) { onPlay(ch, list, idx) }
+                ChannelRow(repo, ch, idx + 1, ev, onFocus = { focusedCh = ch }) {
+                    // 1er clic : aperçu dans le carré. 2e clic sur la même chaîne : plein écran.
+                    if (!repo.preview || pItem?.id == ch.id) onPlay(ch, list, idx)
+                    else Preview.play(appCtx, repo.api.liveUrl(ch.id), ch)
+                }
             }
         }
         Spacer(Modifier.width(12.dp))
         val cur = focusedCh ?: list.firstOrNull()
         val curCat = data.cats.firstOrNull { it.id == catId }
-        ChannelPanel(repo, cur, curCat?.name, ev, Modifier.width(300.dp), onHideCat = {
-            curCat?.let { c ->
-                catId = data.cats.firstOrNull { it.id != c.id }?.id
-                focusedCh = null
-                onHideCat(c)
+        ChannelPanel(
+            repo, cur, curCat?.name, ev, Modifier.width(300.dp), pItem, openFull,
+            onHideCat = {
+                curCat?.let { c ->
+                    catId = data.cats.firstOrNull { it.id != c.id }?.id
+                    focusedCh = null
+                    onHideCat(c)
+                }
             }
-        }) {
+        ) {
             cur?.let { onHide(it) }
             focusedCh = null
         }
@@ -977,7 +1058,10 @@ fun ChannelRow(repo: Repo, ch: Item, num: Int, ev: Int, onFocus: () -> Unit, onC
 }
 
 @Composable
-fun ChannelPanel(repo: Repo, ch: Item?, catName: String?, ev: Int, modifier: Modifier, onHideCat: () -> Unit, onHide: () -> Unit) {
+fun ChannelPanel(
+    repo: Repo, ch: Item?, catName: String?, ev: Int, modifier: Modifier,
+    previewItem: Item?, onPreviewClick: () -> Unit, onHideCat: () -> Unit, onHide: () -> Unit
+) {
     val fmt = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
     var fb by remember(ch?.id) { mutableStateOf<List<Prog>>(emptyList()) }
     LaunchedEffect(ch?.id, ev) {
@@ -990,31 +1074,249 @@ fun ChannelPanel(repo: Repo, ch: Item?, catName: String?, ev: Int, modifier: Mod
     val progs = if (cached.isNotEmpty()) cached else fb
     Column(
         modifier.fillMaxHeight().padding(vertical = 8.dp)
-            .background(Color(0xFF14141A), RoundedCornerShape(12.dp)).padding(16.dp),
+            .background(Color(0xFF14141A), RoundedCornerShape(12.dp))
+            .verticalScroll(rememberScrollState())
+            .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
+        if (repo.preview) PreviewBox(previewItem, onPreviewClick, Modifier.fillMaxWidth())
         if (ch == null) {
             Text("Aucune chaîne", color = MUTED)
         } else {
-            AsyncImage(model = ch.img, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.size(72.dp))
-            Text(ch.name, color = TXT, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            progs.take(3).forEachIndexed { i, p ->
+            Text(ch.name, color = TXT, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            progs.take(2).forEachIndexed { i, p ->
                 Text(if (i == 0) "Maintenant" else "Ensuite", color = ACCENT, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 Text(
                     "${fmt.format(Date(p.start * 1000))} – ${fmt.format(Date(p.stop * 1000))}   ${p.title}",
-                    color = TXT, fontSize = 13.sp, maxLines = 3, overflow = TextOverflow.Ellipsis
+                    color = TXT, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis
                 )
             }
             if (progs.isEmpty()) Text("Programme indisponible", color = MUTED, fontSize = 13.sp)
-            Spacer(Modifier.weight(1f))
             ActionButton(if (repo.isFav("live", ch)) "★ Retirer des favoris" else "☆ Ajouter aux favoris", false) {
                 repo.toggleFav("live", ch)
             }
             ActionButton("Masquer cette chaîne", false, onHide)
             if (catName != null) ActionButton("Masquer la catégorie « $catName »", false, onHideCat)
-            Text("OK : regarder\nPendant la lecture : haut / bas pour changer de chaîne", color = MUTED, fontSize = 11.sp)
         }
     }
+}
+
+/** Petit carré d'aperçu : la chaîne en direct. OK dessus = plein écran, sans coupure (même lecteur). */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@Composable
+fun PreviewBox(item: Item?, onClick: () -> Unit, modifier: Modifier) {
+    var f by remember { mutableStateOf(false) }
+    var pv by remember { mutableStateOf<PlayerView?>(null) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle) {
+        val obs = LifecycleEventObserver { _, ev ->
+            if (ev == Lifecycle.Event.ON_STOP) pv?.player = null
+            if (ev == Lifecycle.Event.ON_START) pv?.player = Preview.player
+        }
+        lifecycle.addObserver(obs)
+        onDispose { lifecycle.removeObserver(obs) }
+    }
+    Box(
+        modifier.aspectRatio(16f / 9f)
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color.Black)
+            .onFocusChanged { f = it.isFocused }
+            .border(3.dp, if (f) Color.White else Color(0xFF3A3A55), RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+    ) {
+        if (item != null) {
+            AndroidView(
+                factory = { c ->
+                    PlayerView(c).apply {
+                        useController = false
+                        isFocusable = false
+                        isFocusableInTouchMode = false
+                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    }
+                },
+                update = { v ->
+                    pv = v
+                    v.player = Preview.player
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+            Text(
+                item.name, fontSize = 11.sp, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth().background(Color(0x99000000)).padding(horizontal = 8.dp, vertical = 3.dp)
+            )
+        } else {
+            Text(
+                "OK sur une chaîne : aperçu en direct", fontSize = 12.sp, color = MUTED, textAlign = TextAlign.Center,
+                modifier = Modifier.align(Alignment.Center).padding(10.dp)
+            )
+        }
+    }
+}
+
+@Composable
+fun SearchPill(selected: Boolean, onClick: () -> Unit) {
+    var f by remember { mutableStateOf(false) }
+    Box(
+        Modifier.onFocusChanged { f = it.isFocused }
+            .clip(CircleShape)
+            .background(if (selected) PILL else Color(0x33FFFFFF))
+            .border(2.dp, if (f) Color.White else Color.Transparent, CircleShape)
+            .clickable(onClick = onClick)
+            .padding(10.dp)
+    ) {
+        Canvas(Modifier.size(20.dp)) {
+            val w = size.width
+            drawCircle(Color.White, radius = w * 0.32f, center = Offset(w * 0.42f, w * 0.42f), style = Stroke(width = w * 0.1f))
+            drawLine(Color.White, Offset(w * 0.65f, w * 0.65f), Offset(w * 0.92f, w * 0.92f), strokeWidth = w * 0.12f, cap = StrokeCap.Round)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- Playlists
+@Composable
+fun PlaylistsScreen(repo: Repo, onPlay: (Playlist, Int) -> Unit) {
+    var sel by remember { mutableStateOf(0) }
+    var dialog by remember { mutableStateOf("") }
+    var itemSel by remember { mutableStateOf<Item?>(null) }
+    val pls = repo.playlists
+    val cur = pls.getOrNull(sel)
+    Row(Modifier.fillMaxSize().padding(horizontal = 32.dp), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+        Column(Modifier.width(300.dp)) {
+            Text("Mes playlists", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TXT)
+            Spacer(Modifier.height(8.dp))
+            LazyColumn {
+                itemsIndexed(pls) { i, p ->
+                    FocusRow("${p.name}  (${p.items.size})", i == sel, onFocus = { sel = i }) { sel = i }
+                }
+                item { FocusRow("+  Nouvelle playlist") { dialog = "new" } }
+            }
+        }
+        Column(Modifier.weight(1f)) {
+            if (cur == null) {
+                Text(
+                    "Crée une playlist, puis ajoute-y des films depuis la page d'un film (bouton « + Playlist »). Ils s'enchaînent automatiquement.",
+                    color = MUTED, fontSize = 14.sp
+                )
+            } else {
+                Text(cur.name, fontSize = 26.sp, fontWeight = FontWeight.Bold, color = TXT, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    ActionButton("▶ Lire", true) { if (cur.items.isNotEmpty()) onPlay(cur, 0) }
+                    ActionButton("Renommer", false) { dialog = "rename" }
+                    ActionButton("Supprimer", false) { dialog = "delete" }
+                }
+                Spacer(Modifier.height(8.dp))
+                if (cur.items.isEmpty()) Text("Playlist vide.", color = MUTED, fontSize = 14.sp)
+                LazyColumn {
+                    itemsIndexed(cur.items) { i, m -> PlaylistItemRow(m, i + 1) { itemSel = m } }
+                }
+            }
+        }
+    }
+    if (dialog == "new" || dialog == "rename") {
+        var name by remember(dialog) { mutableStateOf(if (dialog == "rename") cur?.name ?: "" else "") }
+        AlertDialog(
+            onDismissRequest = { dialog = "" },
+            title = { Text(if (dialog == "new") "Nouvelle playlist" else "Renommer la playlist") },
+            text = {
+                OutlinedTextField(name, { name = it }, singleLine = true, placeholder = { Text("Nom de la playlist") })
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (name.isNotBlank()) {
+                        if (dialog == "new") sel = repo.createPlaylist(name) else repo.renamePlaylist(sel, name)
+                    }
+                    dialog = ""
+                }) { Text("OK") }
+            },
+            dismissButton = { TextButton(onClick = { dialog = "" }) { Text("Annuler") } }
+        )
+    }
+    if (dialog == "delete" && cur != null) {
+        AlertDialog(
+            onDismissRequest = { dialog = "" },
+            title = { Text("Supprimer « ${cur.name} » ?") },
+            confirmButton = {
+                TextButton(onClick = { repo.deletePlaylist(sel); sel = 0; dialog = "" }) { Text("Supprimer") }
+            },
+            dismissButton = { TextButton(onClick = { dialog = "" }) { Text("Annuler") } }
+        )
+    }
+    val it0 = itemSel
+    if (it0 != null && cur != null) {
+        AlertDialog(
+            onDismissRequest = { itemSel = null },
+            title = { Text(it0.name) },
+            confirmButton = {
+                TextButton(onClick = {
+                    val i = cur.items.indexOfFirst { x -> x.id == it0.id }
+                    itemSel = null
+                    if (i >= 0) onPlay(cur, i)
+                }) { Text("Lire à partir d'ici") }
+            },
+            dismissButton = {
+                TextButton(onClick = { repo.removeFromPlaylist(sel, it0.id); itemSel = null }) { Text("Retirer de la playlist") }
+            }
+        )
+    }
+}
+
+@Composable
+fun PlaylistItemRow(item: Item, n: Int, onClick: () -> Unit) {
+    var f by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth()
+            .onFocusChanged { f = it.isFocused }
+            .background(if (f) Color(0x33FFFFFF) else Color.Transparent, RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("$n", color = MUTED, fontSize = 13.sp, modifier = Modifier.width(32.dp))
+        AsyncImage(
+            model = lightImg(item.img, "w92"), contentDescription = null, contentScale = ContentScale.Crop,
+            modifier = Modifier.width(40.dp).height(60.dp).clip(RoundedCornerShape(6.dp)).background(Color(0xFF1C1C24))
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(item.name, color = TXT, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (item.lang.isNotBlank()) Text(item.lang, color = MUTED, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+fun AddToPlaylistDialog(repo: Repo, item: Item, onDone: () -> Unit) {
+    var creating by remember { mutableStateOf(false) }
+    var name by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDone,
+        title = { Text("Ajouter à une playlist") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (!creating) {
+                    repo.playlists.forEachIndexed { i, p ->
+                        FocusRow("${p.name}  (${p.items.size})") { repo.addToPlaylist(i, item); onDone() }
+                    }
+                    FocusRow("+  Nouvelle playlist…") { creating = true }
+                } else {
+                    OutlinedTextField(name, { name = it }, singleLine = true, placeholder = { Text("Nom de la playlist") })
+                }
+            }
+        },
+        confirmButton = {
+            if (creating) {
+                TextButton(onClick = {
+                    if (name.isNotBlank()) {
+                        val i = repo.createPlaylist(name)
+                        repo.addToPlaylist(i, item)
+                        onDone()
+                    }
+                }) { Text("Créer et ajouter") }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDone) { Text("Annuler") } }
+    )
 }
 
 // ---------------------------------------------------------------- Recherche
@@ -1210,9 +1512,10 @@ fun SettingsScreen(repo: Repo, scope: CoroutineScope, logout: () -> Unit) {
             Pill((if (repo.perf) "✓ " else "✕ ") + "Mode performance", repo.perf) { repo.updatePerf(!repo.perf) }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Pill((if (repo.autoNext) "✓ " else "✕ ") + "Enchaîner les épisodes automatiquement", repo.autoNext) {
+            Pill((if (repo.autoNext) "✓ " else "✕ ") + "Lecture automatique (épisode ou film suivant)", repo.autoNext) {
                 repo.updateAutoNext(!repo.autoNext)
             }
+            Pill((if (repo.preview) "✓ " else "✕ ") + "Aperçu des chaînes", repo.preview) { repo.updatePreview(!repo.preview) }
         }
         Text(
             "Mode performance : pas d'images de fond ni d'animations, affiches plus légères. À activer si ça rame encore.",

@@ -15,6 +15,7 @@ import java.util.TimeZone
 
 data class Shelf(val title: String, val items: List<Item>)
 data class Fav(val kind: String, val item: Item)
+data class Playlist(val name: String, val items: List<Item>)
 data class Resume(
     val kind: String, val url: String, val title: String, val img: String?,
     val pos: Long, val dur: Long, val ts: Long
@@ -127,6 +128,11 @@ class Repo(private val ctx: Context, val api: Xtream) {
 
     fun updateAutoNext(b: Boolean) { autoNext = b; prefs.edit().putBoolean("auto_next", b).apply() }
 
+    var preview by mutableStateOf(prefs.getBoolean("preview", true))
+        private set
+
+    fun updatePreview(b: Boolean) { preview = b; prefs.edit().putBoolean("preview", b).apply() }
+
     fun updatePerf(b: Boolean) { perf = b; prefs.edit().putBoolean("perf", b).apply() }
     fun updateAutoBoost(b: Boolean) { autoBoost = b; prefs.edit().putBoolean("auto_boost", b).apply() }
 
@@ -149,7 +155,19 @@ class Repo(private val ctx: Context, val api: Xtream) {
     fun updateFreqEpg(d: Int) { freqEpg = d; prefs.edit().putInt("freq_epg", d).apply() }
 
     companion object {
+        private var inst: Repo? = null
+
+        /** Un seul Repo par compte tant que l'appli est en mémoire : rouvrir l'appli est alors instantané. */
+        fun obtain(ctx: Context, api: Xtream): Repo {
+            val cur = inst
+            if (cur != null && cur.api.key == api.key) return cur
+            val r = Repo(ctx, api)
+            inst = r
+            return r
+        }
+
         fun wipe(ctx: Context) {
+            inst = null
             ctx.filesDir.listFiles()?.forEach { if (it.name.endsWith(".tsv")) it.delete() }
         }
     }
@@ -179,6 +197,60 @@ class Repo(private val ctx: Context, val api: Xtream) {
         ti.renameTo(f("items_$kind.tsv"))
     }
 
+    private fun itemLine(i: Item): String = listOf(
+        i.id, i.name, i.img ?: "", i.cat, i.ext, i.added.toString(), i.rating, i.plot,
+        i.year, i.genre, i.backdrop ?: "", i.epgId, i.lang
+    ).joinToString("\t") { clean(it) }
+
+    private fun parseItem(p: List<String>): Item? {
+        if (p.size < 13) return null
+        return Item(
+            id = p[0], name = p[1], img = p[2].ifBlank { null }, cat = p[3], ext = p[4],
+            added = p[5].toLongOrNull() ?: 0L, rating = p[6], plot = p[7], year = p[8], genre = p[9],
+            backdrop = p[10].ifBlank { null }, epgId = p[11], lang = p[12]
+        )
+    }
+
+    /** Petit fichier « accueil » : seulement les rangées affichées (quelques milliers d'affiches). Lecture quasi instantanée. */
+    private fun saveHome(kind: String, d: Data) {
+        val t = f("home_$kind.tmp")
+        t.bufferedWriter().use { w ->
+            d.rows.forEach { sh ->
+                w.write("S\t" + clean(sh.title)); w.newLine()
+                sh.items.forEach { i -> w.write("I\t" + itemLine(i)); w.newLine() }
+            }
+        }
+        t.renameTo(f("home_$kind.tsv"))
+    }
+
+    private fun readHome(kind: String): Data? {
+        val fh = f("home_$kind.tsv")
+        val fc = f("cats_$kind.tsv")
+        if (!fh.exists() || !fc.exists()) return null
+        val cats = fc.readLines().mapNotNull { l ->
+            val p = l.split('\t')
+            if (p.size >= 2) Cat(p[0], p[1]) else null
+        }
+        val rows = ArrayList<Shelf>()
+        var title = ""
+        var cur = ArrayList<Item>()
+        fh.bufferedReader().useLines { seq ->
+            seq.forEach { l ->
+                if (l.startsWith("S\t")) {
+                    if (title.isNotEmpty() || cur.isNotEmpty()) rows.add(Shelf(title, cur))
+                    title = l.substring(2)
+                    cur = ArrayList()
+                } else if (l.startsWith("I\t")) {
+                    parseItem(l.substring(2).split('\t'))?.let { cur.add(it) }
+                }
+            }
+        }
+        if (title.isNotEmpty() || cur.isNotEmpty()) rows.add(Shelf(title, cur))
+        if (rows.isEmpty()) return null
+        val all = rows.flatMap { it.items }.distinctBy { it.id }
+        return Data(rows, all, cats, all.groupBy { it.cat })
+    }
+
     private fun readCache(kind: String): Data? {
         val fi = f("items_$kind.tsv")
         val fc = f("cats_$kind.tsv")
@@ -206,19 +278,60 @@ class Repo(private val ctx: Context, val api: Xtream) {
         return buildData(cats, items)
     }
 
+    private var cacheDone = false
+    private val full = HashSet<String>()
+
     suspend fun loadCache() {
-        // petits fichiers d'abord, puis le contenu : Films s'affiche dès qu'il est lu, sans attendre le reste
+        if (cacheDone) return
+        // petits fichiers d'abord
         loadHidden()
         loadFavs()
         loadResume()
-        for (k in listOf("vod", "series", "live")) {
+        loadPlaylists()
+        // Films et séries : fichier « accueil » (affiches déjà triées) -> l'écran s'affiche tout de suite
+        for (k in listOf("vod", "series")) {
+            val d = withContext(Dispatchers.IO) {
+                try { readHome(k) } catch (e: Exception) { null }
+            }
+            if (d != null) {
+                data[k] = d
+            } else {
+                // pas de fichier accueil (ancienne version) : lecture complète
+                val d2 = withContext(Dispatchers.IO) {
+                    try { readCache(k)?.also { saveHome(k, it) } } catch (e: Exception) { null }
+                }
+                if (d2 != null) {
+                    data[k] = d2
+                    full.add(k)
+                }
+            }
+        }
+        val live = withContext(Dispatchers.IO) {
+            try { readCache("live") } catch (e: Exception) { null }
+        }
+        if (live != null) {
+            data["live"] = live
+            full.add("live")
+        }
+        cacheDone = true
+    }
+
+    /** En arrière-plan : listes complètes (recherche, fiches) puis guide TV. */
+    suspend fun loadFull() {
+        for (k in listOf("vod", "series")) {
+            if (full.contains(k)) continue
             val d = withContext(Dispatchers.IO) {
                 try { readCache(k) } catch (e: Exception) { null }
             }
-            if (d != null) data[k] = d
+            if (d != null && !full.contains(k)) {
+                data[k] = d
+                full.add(k)
+            }
         }
-        val e = withContext(Dispatchers.IO) { try { readEpg() } catch (e: Exception) { emptyMap() } }
-        epg = e
+        val ep = withContext(Dispatchers.IO) {
+            try { readEpg() } catch (e: Exception) { emptyMap() }
+        }
+        epg = ep
         epgVersion++
     }
 
@@ -239,9 +352,12 @@ class Repo(private val ctx: Context, val api: Xtream) {
                 it.copy(name = n, lang = l)
             }
             save(kind, cats, items)
-            buildData(cats, items)
+            val bd = buildData(cats, items)
+            saveHome(kind, bd)
+            bd
         }
         data[kind] = d
+        full.add(kind)
         prefs.edit().putLong("sync_$kind", System.currentTimeMillis()).apply()
     }
 
@@ -538,6 +654,77 @@ class Repo(private val ctx: Context, val api: Xtream) {
     }
 
     fun favItems(kind: String): List<Item> = favs.filter { it.kind == kind }.map { it.item }
+
+    // ---------------- Playlists (films qui s'enchaînent) ----------------
+    val playlists = mutableStateListOf<Playlist>()
+
+    private fun persistPlaylists() {
+        val t = f("playlists.tmp")
+        t.bufferedWriter().use { w ->
+            playlists.forEach { pl ->
+                w.write("P\t" + clean(pl.name)); w.newLine()
+                pl.items.forEach { m -> w.write("I\t" + itemLine(m)); w.newLine() }
+            }
+        }
+        t.renameTo(f("playlists.tsv"))
+    }
+
+    private fun loadPlaylists() {
+        playlists.clear()
+        val fp = f("playlists.tsv")
+        if (!fp.exists()) return
+        try {
+            val out = ArrayList<Playlist>()
+            var name: String? = null
+            var cur = ArrayList<Item>()
+            fp.readLines().forEach { l ->
+                if (l.startsWith("P\t")) {
+                    val n = name
+                    if (n != null) out.add(Playlist(n, cur))
+                    name = l.substring(2)
+                    cur = ArrayList()
+                } else if (l.startsWith("I\t")) {
+                    parseItem(l.substring(2).split('\t'))?.let { cur.add(it) }
+                }
+            }
+            val last = name
+            if (last != null) out.add(Playlist(last, cur))
+            playlists.addAll(out)
+        } catch (e: Exception) { /* ignoré */ }
+    }
+
+    fun createPlaylist(name: String): Int {
+        playlists.add(Playlist(name.trim().ifBlank { "Playlist" }, emptyList()))
+        persistPlaylists()
+        return playlists.size - 1
+    }
+
+    fun renamePlaylist(i: Int, name: String) {
+        val p = playlists.getOrNull(i) ?: return
+        playlists[i] = p.copy(name = name.trim().ifBlank { p.name })
+        persistPlaylists()
+    }
+
+    fun deletePlaylist(i: Int) {
+        if (i in playlists.indices) {
+            playlists.removeAt(i)
+            persistPlaylists()
+        }
+    }
+
+    fun addToPlaylist(i: Int, item: Item) {
+        val p = playlists.getOrNull(i) ?: return
+        if (p.items.none { it.id == item.id }) {
+            playlists[i] = p.copy(items = p.items + item)
+            persistPlaylists()
+        }
+    }
+
+    fun removeFromPlaylist(i: Int, itemId: String) {
+        val p = playlists.getOrNull(i) ?: return
+        playlists[i] = p.copy(items = p.items.filter { it.id != itemId })
+        persistPlaylists()
+    }
 
     // ---------------- Reprendre la lecture ----------------
     val resumes = mutableStateListOf<Resume>()

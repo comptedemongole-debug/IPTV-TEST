@@ -10,8 +10,8 @@ android {
         applicationId = "com.perso.iptv"
         minSdk = 23
         targetSdk = 34
-        versionCode = 15
-        versionName = "2.3"
+        versionCode = 17
+        versionName = "3.1"
     }
     signingConfigs {
         getByName("debug") {

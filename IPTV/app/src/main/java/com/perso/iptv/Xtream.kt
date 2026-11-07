@@ -40,6 +40,7 @@ private fun JSONObject.firstOf(k: String): String? {
 
 class Xtream(server: String, private val user: String, private val pass: String) {
     private val base = server.trim().trimEnd('/')
+    val key: String get() = "$base|$user|$pass"
 
     private fun call(q: String): String {
         val c = URL("$base/player_api.php?username=$user&password=$pass&$q").openConnection() as HttpURLConnection

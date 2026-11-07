@@ -1,6 +1,5 @@
 package com.perso.iptv
 
-import android.content.Context
 import android.graphics.Color as AColor
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
@@ -48,28 +47,21 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
-import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
-import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
-import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.audio.AudioCapabilities
-import androidx.media3.exoplayer.audio.AudioSink
-import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
 
-/** Un épisode de la série en cours (pour le menu du lecteur). */
-data class EpEntry(val url: String, val label: String, val title: String, val img: String?)
+/** Un épisode de la série en cours (pour le menu Prog). */
+data class EpEntry(val url: String, val label: String, val title: String, val img: String?, val season: String)
 
-/** Ce qui est en cours de lecture : liste de chaînes ou d'épisodes, pour le menu et le zapping. */
+/** Ce qui est en cours de lecture : chaînes, épisodes, ou file de films (catégorie / playlist). */
 object Zap {
     var items: List<Item> = emptyList()
     var index: Int = 0
@@ -77,6 +69,10 @@ object Zap {
     var repo: Repo? = null
     var eps: List<EpEntry> = emptyList()
     var epIndex: Int = 0
+    var vodQueue: List<Item> = emptyList()
+    var vodIndex: Int = 0
+    var queueIsPlaylist: Boolean = false
+    var queueName: String? = null
 }
 
 sealed class MenuEntry {
@@ -90,6 +86,7 @@ private val MENU_ACCENT = Color(0xFFE5484D)
 @androidx.annotation.OptIn(UnstableApi::class)
 class PlayerActivity : ComponentActivity() {
     private var exo: ExoPlayer? = null
+    private var listener: Player.Listener? = null
     private lateinit var view: PlayerView
     private lateinit var info: TextView
     private lateinit var menuView: ComposeView
@@ -102,11 +99,11 @@ class PlayerActivity : ComponentActivity() {
     private var titleX = ""
     private var imgX: String? = null
     private var kindX = "vod"
-    private var pcmMode = false
-    private var curSpeed = 1f
     private var menuOpen by mutableStateOf(false)
     private var menuEntries by mutableStateOf<List<MenuEntry>>(emptyList())
     private var menuPinned by mutableStateOf<MenuEntry.Row?>(null)
+    private var menuTitle by mutableStateOf("")
+    private var menuSub by mutableStateOf("")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -118,7 +115,21 @@ class PlayerActivity : ComponentActivity() {
         kindX = intent.getStringExtra("kind") ?: "vod"
         val startMs = intent.getLongExtra("start", 0L)
 
-        val p = buildPlayer(false)
+        // Plein écran depuis l'aperçu : on reprend le MÊME lecteur, sans couper la chaîne
+        val handoffId = intent.getStringExtra("handoffId")
+        val prev = Preview.player
+        val borrowed = live && handoffId != null && prev != null && Preview.item?.id == handoffId
+        val p: ExoPlayer
+        if (borrowed && prev != null) {
+            p = prev
+            Preview.lent = true
+            Preview.muteAudio(p, false)
+            curUrl = Preview.url
+            retried = curUrl.endsWith(".ts")
+            attachListener(p)
+        } else {
+            p = buildPlayer()
+        }
         exo = p
 
         view = PlayerView(this)
@@ -133,7 +144,7 @@ class PlayerActivity : ComponentActivity() {
         menuView = ComposeView(this)
         menuView.setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = MENU_ACCENT)) {
-                if (menuOpen) PlayerMenu(menuEntries, menuPinned) { closeMenu() }
+                if (menuOpen) PlayerMenu(menuEntries, menuPinned, menuTitle, menuSub) { closeMenu() }
             }
         }
 
@@ -173,113 +184,62 @@ class PlayerActivity : ComponentActivity() {
         setContentView(root)
         view.requestFocus()
 
-        start(url, startMs)
+        if (!borrowed) start(url, startMs)
         if (live && Zap.items.isNotEmpty()) {
             flash()
         } else if (!live) {
             flashMsg(
-                "OK puis ↑ : bouton « Prog »" +
-                    (if (episodeContext()) "\nEnchaîner les épisodes : " + (if (Zap.repo?.autoNext == true) "oui" else "non") else "")
+                "OK puis ↑ : bouton « Prog »\nLecture automatique : " +
+                    (if (Zap.repo?.autoNext == true) "oui" else "non")
             )
         }
     }
 
     // ---------------------------------------------------------------- lecteur
-    private fun buildPlayer(pcm: Boolean): ExoPlayer {
+    private fun buildPlayer(): ExoPlayer {
         val http = DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
             .setUserAgent("Mozilla/5.0")
         val load = DefaultLoadControl.Builder()
             .setBufferDurationsMs(30_000, 120_000, 2_500, 5_000)
             .build()
-        // En mode « PCM », le son n'est pas envoyé tel quel à la TV (passthrough) : c'est ce qui permet de changer la vitesse.
-        val rf = object : DefaultRenderersFactory(this@PlayerActivity) {
-            override fun buildAudioSink(
-                context: Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean
-            ): AudioSink? {
-                if (!pcm) return super.buildAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams)
-                return DefaultAudioSink.Builder(context)
-                    .setAudioCapabilities(AudioCapabilities.DEFAULT_AUDIO_CAPABILITIES)
-                    .setEnableFloatOutput(enableFloatOutput)
-                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
-                    .build()
-            }
-        }
-        val p = ExoPlayer.Builder(this, rf)
+        val p = ExoPlayer.Builder(this)
             .setLoadControl(load)
             .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(http))
             .build()
-        p.addListener(object : Player.Listener {
+        attachListener(p)
+        return p
+    }
+
+    private fun attachListener(p: ExoPlayer) {
+        val l = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 if (!retried && curUrl.endsWith(".m3u8")) {
                     retried = true
-                    p.setMediaItem(MediaItem.fromUri(curUrl.removeSuffix(".m3u8") + ".ts"))
+                    val alt = curUrl.removeSuffix(".m3u8") + ".ts"
+                    curUrl = alt
+                    if (p === Preview.player) Preview.url = alt
+                    p.setMediaItem(MediaItem.fromUri(alt))
                     p.prepare()
                     p.play()
-                } else if (pcm && curSpeed != 1f) {
-                    toast("Vitesse indisponible avec ce son")
-                    handler.post { rebuild(false, 1f) }
                 } else {
                     toast("Lecture impossible")
                 }
             }
 
-            override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
-                if (live) return
-                val s = playbackParameters.speed
-                if (!pcmMode && s != 1f) {
-                    handler.post { rebuild(true, s) }
-                } else if (pcmMode && s == 1f && curSpeed != 1f) {
-                    handler.post { rebuild(false, 1f) }
-                } else {
-                    curSpeed = s
-                }
-            }
-
-            override fun onTracksChanged(tracks: Tracks) {
-                if (pcm && curSpeed != 1f) {
-                    val audio = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
-                    if (audio.isNotEmpty() && audio.none { it.isSelected }) {
-                        toast("Vitesse indisponible avec ce son")
-                        handler.post { rebuild(false, 1f) }
-                    }
-                }
-            }
-
             override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Player.STATE_ENDED && !live && Zap.repo?.autoNext == true) {
-                    val cur = Zap.eps.getOrNull(Zap.epIndex)
-                    if (cur != null && cur.url == curUrl && Zap.epIndex + 1 < Zap.eps.size) {
-                        handler.post { playEpisode(Zap.epIndex + 1) }
-                    }
-                }
+                if (playbackState == Player.STATE_ENDED && !live) handler.post { onEnded() }
             }
-        })
-        return p
-    }
-
-    /** Recrée le lecteur (avec ou sans « passthrough » du son) à la même position, avec la vitesse voulue. */
-    private fun rebuild(pcm: Boolean, speed: Float) {
-        val old = exo ?: return
-        val pos = old.currentPosition
-        val play = old.playWhenReady
-        old.release()
-        pcmMode = pcm
-        curSpeed = speed
-        val p = buildPlayer(pcm)
-        exo = p
-        view.player = p
-        p.setMediaItem(MediaItem.fromUri(curUrl), pos)
-        p.setPlaybackSpeed(speed)
-        p.prepare()
-        p.playWhenReady = play
-        if (speed != 1f) flashMsg("Vitesse x${fmtSpeed(speed)}")
+        }
+        listener = l
+        p.addListener(l)
     }
 
     private fun start(url: String, startMs: Long = 0L) {
         curUrl = url
         retried = false
         val p = exo ?: return
+        if (p === Preview.player) Preview.url = url
         p.setMediaItem(MediaItem.fromUri(url), startMs)
         p.prepare()
         p.playWhenReady = true
@@ -289,10 +249,25 @@ class PlayerActivity : ComponentActivity() {
         Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
     }
 
-    private fun fmtSpeed(s: Float): String =
-        if (s == s.toInt().toFloat()) s.toInt().toString() else s.toString().replace('.', ',')
+    // ---------------------------------------------------------------- chaînes, épisodes, films
+    private fun episodeContext(): Boolean = curUrl.isNotEmpty() && Zap.eps.getOrNull(Zap.epIndex)?.url == curUrl
 
-    // ---------------------------------------------------------------- chaînes et épisodes
+    private fun vodContext(): Boolean {
+        val m = Zap.vodQueue.getOrNull(Zap.vodIndex) ?: return false
+        val a = Zap.api ?: return false
+        return a.vodUrl(m.id, m.ext) == curUrl
+    }
+
+    private fun onEnded() {
+        saveProgress()
+        val auto = Zap.repo?.autoNext == true
+        if (episodeContext()) {
+            if (auto && Zap.epIndex + 1 < Zap.eps.size) playEpisode(Zap.epIndex + 1)
+        } else if (vodContext()) {
+            if ((Zap.queueIsPlaylist || auto) && Zap.vodIndex + 1 < Zap.vodQueue.size) playMovie(Zap.vodIndex + 1)
+        }
+    }
+
     private fun zap(delta: Int) {
         val n = Zap.items.size
         if (n == 0) return
@@ -303,7 +278,9 @@ class PlayerActivity : ComponentActivity() {
         val a = Zap.api ?: return
         if (i !in Zap.items.indices) return
         Zap.index = i
-        start(a.liveUrl(Zap.items[i].id))
+        val ch = Zap.items[i]
+        if (exo === Preview.player) Preview.item = ch
+        start(a.liveUrl(ch.id))
         flash()
     }
 
@@ -315,6 +292,26 @@ class PlayerActivity : ComponentActivity() {
         imgX = e.img
         kindX = "series"
         start(e.url, Zap.repo?.resumeFor(e.url)?.pos ?: 0L)
+    }
+
+    private fun playMovie(i: Int) {
+        val m = Zap.vodQueue.getOrNull(i) ?: return
+        val a = Zap.api ?: return
+        saveProgress()
+        Zap.vodIndex = i
+        val url = a.vodUrl(m.id, m.ext)
+        titleX = m.name
+        imgX = m.img
+        kindX = "vod"
+        start(url, Zap.repo?.resumeFor(url)?.pos ?: 0L)
+    }
+
+    private fun playSingle(m: Item) {
+        Zap.vodQueue = listOf(m)
+        Zap.vodIndex = 0
+        Zap.queueIsPlaylist = false
+        Zap.queueName = null
+        playMovie(0)
     }
 
     private fun flash() {
@@ -337,6 +334,7 @@ class PlayerActivity : ComponentActivity() {
         if (dur > 0) Zap.repo?.saveResume(kindX, curUrl, titleX, imgX, p.currentPosition, dur)
     }
 
+    // ---------------------------------------------------------------- bouton et menu Prog
     private fun progBg(focused: Boolean): GradientDrawable {
         val g = GradientDrawable()
         g.setColor(0xCC000000.toInt())
@@ -345,17 +343,14 @@ class PlayerActivity : ComponentActivity() {
         return g
     }
 
-    private fun episodeContext(): Boolean = Zap.eps.getOrNull(Zap.epIndex)?.url == curUrl && curUrl.isNotEmpty()
-
     private fun autoToggleRow(): MenuEntry.Row {
         val auto = Zap.repo?.autoNext == true
-        return MenuEntry.Row("Enchaîner les épisodes : " + (if (auto) "☑ oui" else "☐ non"), "", false) {
+        return MenuEntry.Row("Lecture automatique : " + (if (auto) "☑ oui" else "☐ non"), "épisode ou film suivant", false) {
             Zap.repo?.updateAutoNext(!auto)
             menuPinned = autoToggleRow()
         }
     }
 
-    // ---------------------------------------------------------------- menu latéral
     private fun buildMenu(): List<MenuEntry> {
         val out = ArrayList<MenuEntry>()
         if (live) {
@@ -364,18 +359,27 @@ class PlayerActivity : ComponentActivity() {
                 val prog = Zap.repo?.progsFor(ch)?.firstOrNull()?.title ?: ""
                 out.add(MenuEntry.Row("${i + 1}   ${ch.name}", prog, i == Zap.index) { zapTo(i); closeMenu() })
             }
-        } else {
-            out.add(MenuEntry.Header("Vitesse de lecture"))
-            for (s in listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 3f)) {
-                val label = "x" + fmtSpeed(s) + (if (s == 1f) "  (normal)" else "")
-                out.add(MenuEntry.Row(label, "", s == curSpeed) { exo?.setPlaybackSpeed(s); closeMenu() })
-            }
-            val cur = Zap.eps.getOrNull(Zap.epIndex)
-            if (cur != null && cur.url == curUrl) {
-                out.add(MenuEntry.Header("Épisodes"))
-                Zap.eps.forEachIndexed { i, e ->
-                    out.add(MenuEntry.Row(e.label, "", i == Zap.epIndex) { playEpisode(i); closeMenu() })
+        } else if (episodeContext()) {
+            var season = ""
+            Zap.eps.forEachIndexed { i, e ->
+                if (e.season != season) {
+                    season = e.season
+                    out.add(MenuEntry.Header("Saison $season"))
                 }
+                out.add(MenuEntry.Row(e.label, "", i == Zap.epIndex) { playEpisode(i); closeMenu() })
+            }
+        } else {
+            if (vodContext()) {
+                val title = if (Zap.queueIsPlaylist) "Playlist « ${Zap.queueName ?: ""} »" else "Dans la même catégorie"
+                out.add(MenuEntry.Header(title))
+                Zap.vodQueue.forEachIndexed { i, m ->
+                    out.add(MenuEntry.Row(m.name, m.lang, i == Zap.vodIndex) { playMovie(i); closeMenu() })
+                }
+            }
+            val favs = Zap.repo?.favItems("vod") ?: emptyList()
+            if (favs.isNotEmpty()) {
+                out.add(MenuEntry.Header("Ma liste"))
+                favs.forEach { m -> out.add(MenuEntry.Row(m.name, m.lang, false) { playSingle(m); closeMenu() }) }
             }
         }
         return out
@@ -383,7 +387,18 @@ class PlayerActivity : ComponentActivity() {
 
     private fun openMenu() {
         menuEntries = buildMenu()
-        menuPinned = if (!live && episodeContext()) autoToggleRow() else null
+        menuPinned = if (!live) autoToggleRow() else null
+        val curEp = Zap.eps.getOrNull(Zap.epIndex)
+        if (live) {
+            menuTitle = Zap.items.getOrNull(Zap.index)?.name ?: ""
+            menuSub = "Chaîne en cours"
+        } else if (episodeContext() && curEp != null) {
+            menuTitle = curEp.title.substringBefore(" · ")
+            menuSub = "En cours : " + curEp.label
+        } else {
+            menuTitle = titleX
+            menuSub = "En cours de lecture"
+        }
         menuOpen = true
         progBtn.visibility = View.GONE
         menuView.requestFocus()
@@ -398,21 +413,17 @@ class PlayerActivity : ComponentActivity() {
     override fun dispatchKeyEvent(e: KeyEvent): Boolean {
         if (e.action == KeyEvent.ACTION_DOWN) {
             val k = e.keyCode
-            // Touche « ≡ » (menu) ou guide : ouvre / ferme le menu latéral
+            // Touche « ≡ » de la télécommande (si la TV la transmet) : ouvre / ferme le menu Prog
             if (k == KeyEvent.KEYCODE_MENU || k == KeyEvent.KEYCODE_GUIDE) {
                 if (menuOpen) closeMenu() else openMenu()
                 return true
             }
-            if (!menuOpen) {
-                val zapping = live && Zap.items.isNotEmpty()
-                if (zapping) {
-                    // Touches P+ / P- : toujours actives
-                    when (k) {
-                        KeyEvent.KEYCODE_CHANNEL_UP -> { zap(1); return true }
-                        KeyEvent.KEYCODE_CHANNEL_DOWN -> { zap(-1); return true }
-                    }
+            if (!menuOpen && live && Zap.items.isNotEmpty()) {
+                when (k) {
+                    KeyEvent.KEYCODE_CHANNEL_UP -> { zap(1); return true }
+                    KeyEvent.KEYCODE_CHANNEL_DOWN -> { zap(-1); return true }
                 }
-                if (zapping && !view.isControllerFullyVisible) {
+                if (!view.isControllerFullyVisible) {
                     when (k) {
                         KeyEvent.KEYCODE_DPAD_UP -> { zap(1); return true }
                         KeyEvent.KEYCODE_DPAD_DOWN -> { zap(-1); return true }
@@ -423,21 +434,37 @@ class PlayerActivity : ComponentActivity() {
         return super.dispatchKeyEvent(e)
     }
 
+    override fun onStart() {
+        super.onStart()
+        exo?.playWhenReady = true
+    }
+
     override fun onStop() {
         saveProgress()
+        exo?.playWhenReady = false
         super.onStop()
     }
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
-        exo?.release()
+        val p = exo
+        if (p != null && p === Preview.player) {
+            // l'aperçu continue (muet) quand on revient à la liste des chaînes
+            view.player = null
+            listener?.let { p.removeListener(it) }
+            Preview.muteAudio(p, true)
+            p.playWhenReady = true
+            Preview.lent = false
+        } else {
+            p?.release()
+        }
         exo = null
         super.onDestroy()
     }
 }
 
 @Composable
-fun PlayerMenu(entries: List<MenuEntry>, pinned: MenuEntry.Row?, onClose: () -> Unit) {
+fun PlayerMenu(entries: List<MenuEntry>, pinned: MenuEntry.Row?, title: String, sub: String, onClose: () -> Unit) {
     val sel = entries.indexOfLast { it is MenuEntry.Row && it.selected }.coerceAtLeast(0)
     val state = rememberLazyListState(initialFirstVisibleItemIndex = maxOf(0, sel - 3))
     val fr = remember { FocusRequester() }
@@ -449,9 +476,22 @@ fun PlayerMenu(entries: List<MenuEntry>, pinned: MenuEntry.Row?, onClose: () -> 
     Row(Modifier.fillMaxSize()) {
         Column(Modifier.width(400.dp).fillMaxHeight().background(MENU_BG).padding(vertical = 16.dp)) {
             Text(
-                "≡  Menu du lecteur", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
+                "≡  Prog", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFFC9C9D2),
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 4.dp)
             )
+            if (title.isNotBlank()) {
+                Text(
+                    title, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp)
+                )
+            }
+            if (sub.isNotBlank()) {
+                Text(
+                    sub, fontSize = 13.sp, color = MENU_ACCENT, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp)
+                )
+            }
             if (pinned != null) MenuRow(pinned, Modifier)
             LazyColumn(Modifier.fillMaxSize(), state = state) {
                 itemsIndexed(entries) { i, e ->

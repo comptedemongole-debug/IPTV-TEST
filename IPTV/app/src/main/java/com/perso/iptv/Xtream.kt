@@ -9,6 +9,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
+import java.net.URLEncoder
 import java.net.URL
 
 data class Cat(val id: String, val name: String)
@@ -41,13 +42,39 @@ private fun JSONObject.firstOf(k: String): String? {
 class Xtream(server: String, private val user: String, private val pass: String) {
     private val base = server.trim().trimEnd('/')
     val key: String get() = "$base|$user|$pass"
+    private val ue = URLEncoder.encode(user, "UTF-8")
+    private val pe = URLEncoder.encode(pass, "UTF-8")
 
     private fun call(q: String): String {
-        val c = URL("$base/player_api.php?username=$user&password=$pass&$q").openConnection() as HttpURLConnection
+        val c = URL("$base/player_api.php?username=$ue&password=$pe&$q").openConnection() as HttpURLConnection
         c.connectTimeout = 15000
         c.readTimeout = 60000
         c.setRequestProperty("User-Agent", "Mozilla/5.0")
         return c.inputStream.bufferedReader().use { it.readText() }
+    }
+
+    /** Teste la connexion. Retourne null si tout est bon, sinon un message lisible. */
+    suspend fun check(): String? = withContext(Dispatchers.IO) {
+        try {
+            val o = JSONObject(call(""))
+            val ui = o.optJSONObject("user_info")
+            if (ui == null) {
+                "Réponse inattendue : vérifie l'adresse et le port du serveur."
+            } else if (ui.str("auth") != "1") {
+                "Identifiant ou mot de passe refusé."
+            } else {
+                val st = ui.str("status")
+                if (st.isNotBlank() && !st.equals("Active", ignoreCase = true)) "Abonnement : $st" else null
+            }
+        } catch (e: java.net.UnknownHostException) {
+            "Serveur introuvable : vérifie l'adresse."
+        } catch (e: java.net.SocketTimeoutException) {
+            "Le serveur ne répond pas."
+        } catch (e: org.json.JSONException) {
+            "Réponse inattendue : vérifie l'adresse et le port du serveur."
+        } catch (e: Exception) {
+            "Connexion impossible : ${e.javaClass.simpleName}"
+        }
     }
 
     suspend fun cats(kind: String): List<Cat> = withContext(Dispatchers.IO) {
@@ -61,7 +88,7 @@ class Xtream(server: String, private val user: String, private val pass: String)
     suspend fun items(kind: String): List<Item> = withContext(Dispatchers.IO) {
         val series = kind == "series"
         val act = if (series) "get_series" else "get_${kind}_streams"
-        val c = URL("$base/player_api.php?username=$user&password=$pass&action=$act").openConnection() as HttpURLConnection
+        val c = URL("$base/player_api.php?username=$ue&password=$pe&action=$act").openConnection() as HttpURLConnection
         c.connectTimeout = 15000
         c.readTimeout = 120000
         c.setRequestProperty("User-Agent", "Mozilla/5.0")
@@ -219,14 +246,14 @@ class Xtream(server: String, private val user: String, private val pass: String)
     }
 
     fun xmltvStream(): java.io.InputStream {
-        val c = URL("$base/xmltv.php?username=$user&password=$pass").openConnection() as HttpURLConnection
+        val c = URL("$base/xmltv.php?username=$ue&password=$pe").openConnection() as HttpURLConnection
         c.connectTimeout = 15000
         c.readTimeout = 180000
         c.setRequestProperty("User-Agent", "Mozilla/5.0")
         return c.inputStream
     }
 
-    fun liveUrl(id: String) = "$base/live/$user/$pass/$id.m3u8"
-    fun vodUrl(id: String, ext: String) = "$base/movie/$user/$pass/$id.$ext"
-    fun epUrl(id: String, ext: String) = "$base/series/$user/$pass/$id.$ext"
+    fun liveUrl(id: String) = "$base/live/$ue/$pe/$id.m3u8"
+    fun vodUrl(id: String, ext: String) = "$base/movie/$ue/$pe/$id.$ext"
+    fun epUrl(id: String, ext: String) = "$base/series/$ue/$pe/$id.$ext"
 }

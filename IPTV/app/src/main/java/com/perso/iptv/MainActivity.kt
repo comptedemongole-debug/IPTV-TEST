@@ -33,6 +33,11 @@ import androidx.compose.ui.unit.Dp
 import coil.imageLoader
 import coil.request.ImageRequest
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -269,18 +274,77 @@ fun Login(onOk: (String, String, String) -> Unit) {
     var s by remember { mutableStateOf("http://") }
     var u by remember { mutableStateOf("") }
     var p by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var msg by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    val focus = LocalFocusManager.current
+
+    fun submit() {
+        if (busy) return
+        var server = s.trim()
+        var user = u.trim()
+        var pass = p.trim()
+        // URL complète collée (http://hote:port/get.php?username=...&password=...) : on en extrait tout
+        val mu = Regex("username=([^&\\s]+)").find(server)
+        val mp = Regex("password=([^&\\s]+)").find(server)
+        if (mu != null && mp != null) {
+            user = mu.groupValues[1]
+            pass = mp.groupValues[1]
+            server = server.substringBefore("/get.php").substringBefore("/player_api.php").substringBefore("/xmltv.php")
+        }
+        if (server.isNotBlank() && !server.startsWith("http")) server = "http://$server"
+        if (server == "http://" || user.isBlank() || pass.isBlank()) {
+            msg = "Remplis le serveur, l'identifiant et le mot de passe."
+            return
+        }
+        focus.clearFocus()
+        busy = true
+        msg = "Connexion en cours…"
+        scope.launch {
+            val r = Xtream(server, user, pass).check()
+            busy = false
+            if (r == null) onOk(server, user, pass) else msg = r
+        }
+    }
+
     Column(
-        Modifier.fillMaxSize().padding(60.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 40.dp, vertical = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Logo(80.dp)
-        Text("Kinéo", style = MaterialTheme.typography.headlineLarge)
-        Text("Connexion à ton service IPTV", color = MUTED)
-        OutlinedTextField(s, { s = it }, label = { Text("Serveur (http://adresse:port)") }, singleLine = true)
-        OutlinedTextField(u, { u = it }, label = { Text("Identifiant") }, singleLine = true)
-        OutlinedTextField(p, { p = it }, label = { Text("Mot de passe") }, singleLine = true)
-        Button(onClick = { onOk(s.trim(), u.trim(), p.trim()) }) { Text("Se connecter") }
+        Logo(56.dp)
+        Text("Kinéo", fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, color = TXT)
+        Text("Connexion à ton service IPTV", color = MUTED, fontSize = 14.sp)
+        OutlinedTextField(
+            s, { s = it }, singleLine = true,
+            label = { Text("Serveur (http://adresse:port)") },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+            keyboardActions = KeyboardActions(onNext = { focus.moveFocus(FocusDirection.Down) }),
+            modifier = Modifier.fillMaxWidth(0.7f)
+        )
+        OutlinedTextField(
+            u, { u = it }, singleLine = true,
+            label = { Text("Identifiant") },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+            keyboardActions = KeyboardActions(onNext = { focus.moveFocus(FocusDirection.Down) }),
+            modifier = Modifier.fillMaxWidth(0.7f)
+        )
+        OutlinedTextField(
+            p, { p = it }, singleLine = true,
+            label = { Text("Mot de passe") },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { submit() }),
+            modifier = Modifier.fillMaxWidth(0.7f)
+        )
+        ActionButton(if (busy) "Connexion…" else "Se connecter", true) { submit() }
+        if (msg.isNotBlank()) {
+            Text(msg, color = if (busy) MUTED else ACCENT, fontSize = 14.sp, textAlign = TextAlign.Center)
+        }
+        Text(
+            "Sur le clavier : « Suivant » passe au champ d'après, « OK » sur le mot de passe se connecte. " +
+                "Tu peux aussi coller ton lien complet (get.php?username=…&password=…) dans « Serveur ».",
+            color = MUTED, fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth(0.7f)
+        )
     }
 }
 

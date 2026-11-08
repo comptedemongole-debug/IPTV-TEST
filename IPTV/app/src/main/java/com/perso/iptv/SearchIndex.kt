@@ -20,12 +20,44 @@ class SearchIndex private constructor(
     private val vocab: Array<String>,
     private val post: Array<IntArray>,
     private val rate: ByteArray,
-    private val dkey: Array<String>,
-    private val vyear: Array<String>?,
-    private val byTitle: HashMap<String, IntArray>?,
+    private val withVersions: Boolean,
     private val maxTok: Int
 ) {
     val size: Int get() = items.size
+
+    private class Ver(val years: Array<String>, val byTitle: HashMap<String, IntArray>, val dkey: Array<String>)
+
+    /** Données « doublons » : calculées seulement à la première demande (fiche d'un film), pas au démarrage. */
+    private val ver: Lazy<Ver?> = lazy(LazyThreadSafetyMode.PUBLICATION) { if (withVersions) computeVer() else null }
+
+    private fun computeVer(): Ver {
+        val n = items.size
+        val titles = Array(n) { "" }
+        val years = Array(n) { "" }
+        val yearsOf = HashMap<String, HashSet<String>>()
+        for (i in 0 until n) {
+            val k = Versions.key(items[i].name, items[i].year)
+            titles[i] = k.title
+            years[i] = k.year
+            if (k.year.isNotEmpty()) yearsOf.getOrPut(k.title) { HashSet() }.add(k.year)
+        }
+        val dkey = Array(n) { i ->
+            val ys = yearsOf[titles[i]]
+            if (ys == null || ys.size <= 1) titles[i] else titles[i] + "|" + years[i]
+        }
+        val bt = HashMap<String, IntBuf>()
+        for (i in 0 until n) {
+            var b = bt[titles[i]]
+            if (b == null) {
+                b = IntBuf()
+                bt[titles[i]] = b
+            }
+            b.add(i)
+        }
+        val fin = HashMap<String, IntArray>(bt.size * 2)
+        for ((k, v) in bt) fin[k] = v.toArray()
+        return Ver(years, fin, dkey)
+    }
 
     private class IntBuf {
         var a = IntArray(2)
@@ -85,40 +117,7 @@ class SearchIndex private constructor(
                 if (r != null) rate[i] = (r.coerceIn(0.0, 10.0) * 3).toInt().toByte()
             }
 
-            var vyear: Array<String>? = null
-            var byTitle: HashMap<String, IntArray>? = null
-            val dkey: Array<String>
-            if (withVersions) {
-                val titles = Array(n) { "" }
-                val years = Array(n) { "" }
-                val yearsOf = HashMap<String, HashSet<String>>()
-                for (i in 0 until n) {
-                    val k = Versions.key(items[i].name, items[i].year)
-                    titles[i] = k.title
-                    years[i] = k.year
-                    if (k.year.isNotEmpty()) yearsOf.getOrPut(k.title) { HashSet() }.add(k.year)
-                }
-                dkey = Array(n) { i ->
-                    val ys = yearsOf[titles[i]]
-                    if (ys == null || ys.size <= 1) titles[i] else titles[i] + "|" + years[i]
-                }
-                val bt = HashMap<String, IntBuf>()
-                for (i in 0 until n) {
-                    var b = bt[titles[i]]
-                    if (b == null) {
-                        b = IntBuf()
-                        bt[titles[i]] = b
-                    }
-                    b.add(i)
-                }
-                val fin = HashMap<String, IntArray>(bt.size * 2)
-                for ((k, v) in bt) fin[k] = v.toArray()
-                byTitle = fin
-                vyear = years
-            } else {
-                dkey = norm
-            }
-            return SearchIndex(items, norm, compact, vocab, post, rate, dkey, vyear, byTitle, maxTok)
+            return SearchIndex(items, norm, compact, vocab, post, rate, withVersions, maxTok)
         }
     }
 
@@ -237,6 +236,16 @@ class SearchIndex private constructor(
         }
         order.add(ranked(strict, qn, qt, 0, null))
 
+        // 1b) comme avant : le texte saisi apparaît n'importe où dans le titre (classé après les meilleurs résultats)
+        run {
+            val sub = BitSet(items.size)
+            for (i in items.indices) {
+                if (!strict.get(i) && norm[i].contains(qn)) sub.set(i)
+            }
+            if (!sub.isEmpty) order.add(ranked(sub, qn, qt, -1000, null))
+            strict.or(sub)
+        }
+
         // 2) peu de résultats : mots collés / séparés, puis fautes de frappe
         if (strict.cardinality() < 12) {
             val qc = qn.replace(" ", "")
@@ -268,7 +277,6 @@ class SearchIndex private constructor(
         }
 
         val out = ArrayList<Item>()
-        val seen = HashSet<String>()
         val used = BitSet(items.size)
         for (arr in order) {
             var i = arr.size - 1
@@ -279,7 +287,6 @@ class SearchIndex private constructor(
                 used.set(id)
                 val it = items[id]
                 if (!accept(it)) continue
-                if (!seen.add(dkey[id])) continue
                 out.add(it)
             }
             if (out.size >= limit) break
@@ -290,11 +297,12 @@ class SearchIndex private constructor(
     // ------------------------------------------------------------------ versions et acteurs
     /** Les autres versions du même film / de la même série (jamais deux années différentes). */
     fun versionsOf(item: Item): List<Item> {
-        val bt = byTitle ?: return listOf(item)
+        val v = ver.value ?: return listOf(item)
+        val bt = v.byTitle
         val k = Versions.key(item.name, item.year)
         val ids = bt[k.title] ?: return listOf(item)
         if (ids.size <= 1) return listOf(item)
-        val ys = vyear ?: return listOf(item)
+        val ys = v.years
         val years = HashSet<String>()
         for (id in ids) if (ys[id].isNotEmpty()) years.add(ys[id])
         val out = ArrayList<Item>()
@@ -313,8 +321,10 @@ class SearchIndex private constructor(
 
     /** Titres locaux correspondant à une filmographie TMDB (recherche par acteur / réalisateur). */
     fun matchCredits(credits: List<TmCredit>, tv: Boolean, accept: (Item) -> Boolean): List<Item> {
-        val bt = byTitle ?: return emptyList()
-        val ys = vyear ?: return emptyList()
+        val v = ver.value ?: return emptyList()
+        val bt = v.byTitle
+        val ys = v.years
+        val dkey = v.dkey
         val out = ArrayList<Item>()
         val seen = HashSet<String>()
         for (c in credits) {

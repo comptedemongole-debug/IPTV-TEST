@@ -28,7 +28,7 @@ data class Info(
     val cast: String = "", val director: String = "", val tmdb: String = "",
     // Caractéristiques techniques lues dans la réponse du serveur (0 / vide = non communiqué)
     val width: Int = 0, val height: Int = 0, val vcodec: String = "", val acodec: String = "",
-    val channels: Int = 0, val bitrate: Int = 0
+    val channels: Int = 0, val bitrate: Int = 0, val fps: Double = 0.0
 )
 data class Prog(val title: String, val start: Long, val stop: Long)
 
@@ -155,6 +155,17 @@ class Xtream(server: String, private val user: String, private val pass: String)
         )
     }
 
+    /** « 24000/1001 » ou « 25 » -> 23.976 / 25.0 ; 0.0 si non communiqué. */
+    private fun parseFps(vararg raw: String): Double {
+        for (r in raw) {
+            val p = r.trim().split('/')
+            val a = p.getOrNull(0)?.toDoubleOrNull() ?: continue
+            val b = p.getOrNull(1)?.toDoubleOrNull() ?: 1.0
+            if (b > 0.0 && a / b in 5.0..240.0) return a / b
+        }
+        return 0.0
+    }
+
     /** Fiches déjà demandées : naviguer d'un film à l'autre ou revenir en arrière ne refait pas la requête. */
     private val infoCache = object : LinkedHashMap<String, Info>(64, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Info>?): Boolean = size > 300
@@ -181,7 +192,8 @@ class Xtream(server: String, private val user: String, private val pass: String)
                 vcodec = v?.str("codec_name") ?: "",
                 acodec = a?.str("codec_name") ?: "",
                 channels = a?.optInt("channels", 0) ?: 0,
-                bitrate = o.optInt("bitrate", 0)
+                bitrate = o.optInt("bitrate", 0),
+                fps = parseFps(v?.str("avg_frame_rate") ?: "", v?.str("r_frame_rate") ?: "")
             )
             synchronized(infoCache) { infoCache[id] = info }
             info

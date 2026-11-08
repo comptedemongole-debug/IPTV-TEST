@@ -129,6 +129,28 @@ object Versions {
         return parts.joinToString(" · ")
     }
 
+    private val rQ4k = Regex("\\b(4k|uhd|2160p?)\\b", RegexOption.IGNORE_CASE)
+    private val rQ1080 = Regex("\\b(1080[pi]?|fhd)\\b", RegexOption.IGNORE_CASE)
+    private val rQ720 = Regex("\\b720p?\\b", RegexOption.IGNORE_CASE)
+
+    /** Qualité écrite dans le titre ("4K", "1080p", "720p"), ou vide. Indication du fournisseur, non vérifiée. */
+    fun quality(name: String): String = when {
+        rQ4k.containsMatchIn(name) -> "4K"
+        rQ1080.containsMatchIn(name) -> "1080p"
+        rQ720.containsMatchIn(name) -> "720p"
+        else -> ""
+    }
+
+    private fun resLabel(h: Int): String = when {
+        h >= 2000 -> "4K"
+        h >= 1000 -> "1080p"
+        h >= 700 -> "720p"
+        else -> "${h}p"
+    }
+
+    private fun fpsLabel(f: Double): String =
+        if (Math.abs(f - Math.round(f)) < 0.05) "${Math.round(f)} fps" else String.format(java.util.Locale.US, "%.2f fps", f)
+
     private fun channelsLabel(n: Int): String = when (n) {
         0 -> ""
         1 -> " mono"
@@ -158,7 +180,9 @@ object Versions {
             parts.add(item.ext.uppercase())
             val inf = api.vodInfo(item.id)
             if (inf != null) {
+                if (inf.height > 0) parts.add(resLabel(inf.height))
                 if (inf.width > 0 && inf.height > 0) parts.add("${inf.width}×${inf.height}")
+                if (inf.fps > 0.0) parts.add(fpsLabel(inf.fps))
                 if (inf.vcodec.isNotBlank()) parts.add(inf.vcodec.uppercase())
                 if (inf.acodec.isNotBlank()) parts.add(inf.acodec.uppercase() + channelsLabel(inf.channels))
                 if (inf.bitrate > 0) parts.add(bitrateLabel(inf.bitrate))

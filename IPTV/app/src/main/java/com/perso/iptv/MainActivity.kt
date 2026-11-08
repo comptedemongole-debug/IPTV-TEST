@@ -361,6 +361,26 @@ fun Home(api: Xtream, logout: () -> Unit) {
 
     BackHandler(enabled = detail != null) { detail = null }
 
+    // Nouveau jour : mise à jour de la playlist à la première ouverture / reprise de l'appli de la journée
+    val lifeOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    val dayScope = rememberCoroutineScope()
+    DisposableEffect(lifeOwner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, ev ->
+            if (ev == androidx.lifecycle.Lifecycle.Event.ON_START && cacheLoaded) {
+                dayScope.launch {
+                    try {
+                        repo.refreshContent(false)
+                        repo.syncEpgIfDue()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) { /* sera retenté */ }
+                }
+            }
+        }
+        lifeOwner.lifecycle.addObserver(obs)
+        onDispose { lifeOwner.lifecycle.removeObserver(obs) }
+    }
+
     LaunchedEffect(repo) {
         try {
             Zap.repo = repo
@@ -825,6 +845,15 @@ fun Poster(item: Item, ratio: Float, fit: Boolean, onFocus: (Item) -> Unit, prog
                 modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                     .clip(RoundedCornerShape(bottomStart = 8.dp, bottomEnd = 8.dp))
                     .background(Color(0xCC000000)).padding(6.dp)
+            )
+        }
+        val q = remember(item.name) { Versions.quality(item.name) }
+        if (!fit && q.isNotEmpty()) {
+            Text(
+                q, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White,
+                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)
+                    .background(Color(0xCC000000), RoundedCornerShape(50))
+                    .padding(horizontal = 7.dp, vertical = 2.dp)
             )
         }
         if (!fit && item.lang.isNotBlank()) {

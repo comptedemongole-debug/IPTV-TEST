@@ -13,6 +13,7 @@ import org.json.JSONObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.util.concurrent.ConcurrentHashMap
@@ -119,6 +120,15 @@ class Repo(private val ctx: Context, val api: Xtream) {
     var freqContent by mutableStateOf(prefs.getInt("freq_content", 1))
         private set
     var freqEpg by mutableStateOf(prefs.getInt("freq_epg", 1))
+
+    init {
+        // v3.4 : mise à jour quotidienne (remise à « chaque jour » une seule fois)
+        if (!prefs.getBoolean("daily34", false)) {
+            freqContent = 1
+            freqEpg = 1
+            prefs.edit().putInt("freq_content", 1).putInt("freq_epg", 1).putBoolean("daily34", true).apply()
+        }
+    }
         private set
     var lastContentTs by mutableStateOf(prefs.getLong("sync_ts", 0L))
         private set
@@ -1080,7 +1090,12 @@ class Repo(private val ctx: Context, val api: Xtream) {
     private val idx = ConcurrentHashMap<String, SearchIndex>()
     private val idxToken = ConcurrentHashMap<String, Int>()
     private val idxCounter = AtomicInteger()
-    private val bg = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    // un seul thread, priorité minimale : la construction de l'index ne ralentit jamais l'interface
+    private val bg = CoroutineScope(
+        SupervisorJob() + java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "kineo-index").apply { priority = Thread.MIN_PRIORITY }
+        }.asCoroutineDispatcher()
+    )
 
     /** Incrémenté à chaque reconstruction d'index : l'écran de recherche se relance tout seul. */
     var searchVersion by mutableStateOf(0)
@@ -1116,7 +1131,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
 
     private fun findIn(kind: String, q: String): List<Item> {
         val ix = idx[kind] ?: return emptyList()
-        return ix.search(q, 200) { !isHidden(kind, it) }
+        return ix.search(q, 500) { true }
     }
 
     /** Autres versions (doublons confirmés par le titre et l'année) d'un film ou d'une série. */
@@ -1138,8 +1153,8 @@ class Repo(private val ctx: Context, val api: Xtream) {
             }
         if (cr.isEmpty()) return none
         return withContext(Dispatchers.Default) {
-            val v = idx["vod"]?.matchCredits(cr, false) { !isHidden("vod", it) } ?: emptyList()
-            val sr = idx["series"]?.matchCredits(cr, true) { !isHidden("series", it) } ?: emptyList()
+            val v = idx["vod"]?.matchCredits(cr, false) { true } ?: emptyList()
+            val sr = idx["series"]?.matchCredits(cr, true) { true } ?: emptyList()
             Pair(v, sr)
         }
     }

@@ -32,7 +32,7 @@ object Preview {
         val load = DefaultLoadControl.Builder()
             .setBufferDurationsMs(5_000, 30_000, 1_500, 3_000)
             .build()
-        val p = ExoPlayer.Builder(ctx)
+        val p = ExoPlayer.Builder(ctx, makeRenderers(ctx, Zap.repo?.pcmAudio == true))
             .setLoadControl(load)
             .setMediaSourceFactory(DefaultMediaSourceFactory(ctx).setDataSourceFactory(http))
             .build()

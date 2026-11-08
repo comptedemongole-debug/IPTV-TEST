@@ -24,3 +24,13 @@ Le lien reste le meme a chaque mise a jour : il donne toujours la derniere versi
 VERSION 1.2 : synchronisation unique puis navigation instantanee (cache sur la TV), vraie interface TV
 (categories / chaines / guide), recherche separee TV-Films-Series, pastille de langue sur les films,
 reglages de mise a jour (chaque jour / 3 jours / semaine / mois) pour le contenu et le guide TV.
+
+
+=== Version 3.4 ===
+- Recherche instantanée (index local, tolérance aux fautes, acteurs/réalisateurs via TMDB, sans doublons).
+- Versions multiples d'un film / série : bouton « Versions » dans la fiche (infos réellement détectées uniquement).
+- Lecteur anti-coupure : reconnexion progressive bornée, détection des blocages, bascule vers une source confirmée identique.
+- Chromecast : décodeur audio logiciel (AC3/E-AC3/DTS…) en dernier recours, menu des pistes audio complet.
+- Performances : cache EPG / fiches, images allégées, loader d'images réglé, mode Performance étendu (tampon vidéo court).
+- « Libérer la mémoire » ne ferme plus les autres applis (il libère uniquement les caches de Kinéo).
+- Message de démarrage retiré.

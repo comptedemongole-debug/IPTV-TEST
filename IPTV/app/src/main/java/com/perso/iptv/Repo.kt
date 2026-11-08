@@ -4,9 +4,19 @@ import android.content.Context
 import android.util.Xml
 import androidx.compose.runtime.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import org.xmlpull.v1.XmlPullParser
 import java.io.File
 import java.text.SimpleDateFormat
@@ -126,7 +136,12 @@ class Repo(private val ctx: Context, val api: Xtream) {
     var autoNext by mutableStateOf(prefs.getBoolean("auto_next", false))
         private set
 
-    fun updateAutoNext(b: Boolean) { autoNext = b; prefs.edit().putBoolean("auto_next", b).apply() }
+    fun updateAutoNext(b: Boolean) { autoNext = b; prefs.edit().putBoolean("auto_next", b).apply(); touch("settings") }
+
+    var pcmAudio by mutableStateOf(prefs.getBoolean("pcm_audio", false))
+        private set
+
+    fun updatePcmAudio(b: Boolean) { pcmAudio = b; prefs.edit().putBoolean("pcm_audio", b).apply() }
 
     var preview by mutableStateOf(prefs.getBoolean("preview", true))
         private set
@@ -151,8 +166,8 @@ class Repo(private val ctx: Context, val api: Xtream) {
     private var busy = false
     private var busyEpg = false
 
-    fun updateFreqContent(d: Int) { freqContent = d; prefs.edit().putInt("freq_content", d).apply() }
-    fun updateFreqEpg(d: Int) { freqEpg = d; prefs.edit().putInt("freq_epg", d).apply() }
+    fun updateFreqContent(d: Int) { freqContent = d; prefs.edit().putInt("freq_content", d).apply(); touch("settings") }
+    fun updateFreqEpg(d: Int) { freqEpg = d; prefs.edit().putInt("freq_epg", d).apply(); touch("settings") }
 
     companion object {
         private var inst: Repo? = null
@@ -295,6 +310,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
             }
             if (d != null) {
                 data[k] = d
+                reindex(k)
             } else {
                 // pas de fichier accueil (ancienne version) : lecture complète
                 val d2 = withContext(Dispatchers.IO) {
@@ -303,6 +319,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
                 if (d2 != null) {
                     data[k] = d2
                     full.add(k)
+                    reindex(k)
                 }
             }
         }
@@ -312,6 +329,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
         if (live != null) {
             data["live"] = live
             full.add("live")
+            reindex("live")
         }
         cacheDone = true
     }
@@ -320,12 +338,14 @@ class Repo(private val ctx: Context, val api: Xtream) {
     suspend fun loadFull() {
         for (k in listOf("vod", "series")) {
             if (full.contains(k)) continue
+            waitWhilePlaying()
             val d = withContext(Dispatchers.IO) {
                 try { readCache(k) } catch (e: Exception) { null }
             }
             if (d != null && !full.contains(k)) {
                 data[k] = d
                 full.add(k)
+                reindex(k)
             }
         }
         val ep = withContext(Dispatchers.IO) {
@@ -358,6 +378,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
         }
         data[kind] = d
         full.add(kind)
+        reindex(kind)
         prefs.edit().putLong("sync_$kind", System.currentTimeMillis()).apply()
     }
 
@@ -367,6 +388,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
         var err: String? = null
         try {
             for (k in listOf("vod", "series", "live")) {
+                waitWhilePlaying()
                 val last = prefs.getLong("sync_$k", 0L)
                 val due = data[k] == null || force || daysSince(last) >= freqContent
                 if (due) {
@@ -468,6 +490,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
         status = "Mise à jour du guide TV…"
         try {
             val wanted = live.all.mapNotNullTo(HashSet<String>()) { it.epgId.ifBlank { null } }
+            waitWhilePlaying()
             val m = withContext(Dispatchers.IO) { downloadEpg(wanted) }
             epg = m
             epgVersion++
@@ -506,8 +529,8 @@ class Repo(private val ctx: Context, val api: Xtream) {
     val hiddenCats = mutableStateMapOf<String, String>()
     var hiddenVersion by mutableStateOf(0)
         private set
-    private val setI = HashSet<String>()
-    private val setC = HashSet<String>()
+    private val setI = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val setC = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     private fun persistHidden() {
         val t = f("hidden.tmp")
@@ -516,6 +539,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
             hiddenCats.forEach { (k, n) -> w.write("C\t" + clean(k) + "\t" + clean(n)); w.newLine() }
         }
         t.renameTo(f("hidden.tsv"))
+        touch("hidden")
     }
 
     private fun loadHidden() {
@@ -620,6 +644,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
             }
         }
         t.renameTo(f("favs.tsv"))
+        touch("favs")
     }
 
     private fun loadFavs() {
@@ -667,6 +692,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
             }
         }
         t.renameTo(f("playlists.tsv"))
+        touch("playlists")
     }
 
     private fun loadPlaylists() {
@@ -739,6 +765,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
             }
         }
         t.renameTo(f("resume.tsv"))
+        touch("resume")
     }
 
     private fun loadResume() {
@@ -771,15 +798,377 @@ class Repo(private val ctx: Context, val api: Xtream) {
 
     fun resumeFor(url: String): Resume? = resumes.firstOrNull { it.url == url }
 
-    // ---------------- recherche ----------------
+    // ---------------- Synchronisation entre appareils ----------------
+    var cloudOn by mutableStateOf(prefs.getBoolean("cloud_on", true))
+        private set
+    var cloudId by mutableStateOf(prefs.getString("cloud_id", "") ?: "")
+        private set
+    var cloudMsg by mutableStateOf("")
+        private set
+    var cloudLast by mutableStateOf(prefs.getLong("cloud_last", 0L))
+        private set
+    private var cloudBusy = false
+    private var applying = false
+    private var cloudJob: Job? = null
+    private val cloudScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    private fun tsOf(sec: String): Long = prefs.getLong("ts_$sec", 0L)
+
+    /** Une section a changé sur cet appareil : on note l'heure et on synchronise dans quelques secondes. */
+    private fun touch(section: String) {
+        if (applying) return
+        prefs.edit().putLong("ts_$section", System.currentTimeMillis()).apply()
+        if (cloudOn) scheduleCloud()
+    }
+
+    private fun scheduleCloud() {
+        cloudJob?.cancel()
+        cloudJob = cloudScope.launch {
+            delay(4000)
+            syncCloud()
+        }
+    }
+
+    fun updateCloudOn(b: Boolean) {
+        cloudOn = b
+        prefs.edit().putBoolean("cloud_on", b).apply()
+        if (b) scheduleCloud()
+    }
+
+    private fun saveCloudId(id: String) {
+        cloudId = id
+        prefs.edit().putString("cloud_id", id).apply()
+    }
+
+    private fun itemJson(i: Item): JSONObject = JSONObject()
+        .put("id", i.id).put("name", i.name).put("img", i.img ?: "").put("cat", i.cat).put("ext", i.ext)
+        .put("added", i.added).put("rating", i.rating).put("year", i.year).put("genre", i.genre)
+        .put("epgId", i.epgId).put("lang", i.lang)
+
+    private fun itemFromJson(o: JSONObject): Item = Item(
+        id = o.optString("id"), name = o.optString("name"), img = o.optString("img").ifBlank { null },
+        cat = o.optString("cat"), ext = o.optString("ext").ifBlank { "mp4" }, added = o.optLong("added"),
+        rating = o.optString("rating"), year = o.optString("year"), genre = o.optString("genre"),
+        epgId = o.optString("epgId"), lang = o.optString("lang")
+    )
+
+    private fun buildSnapshot(initial: Boolean): JSONObject {
+        val now = System.currentTimeMillis()
+        fun ts(sec: String, nonEmpty: Boolean): Long {
+            var t = tsOf(sec)
+            if (initial && t == 0L && nonEmpty) {
+                t = now
+                prefs.edit().putLong("ts_$sec", t).apply()
+            }
+            return t
+        }
+        val root = JSONObject()
+
+        val hidden = JSONObject()
+        hidden.put("ts", ts("hidden", hiddenItems.isNotEmpty() || hiddenCats.isNotEmpty()))
+        val hi = JSONArray()
+        hiddenItems.forEach { (k, n) -> hi.put(JSONArray().put(k).put(n)) }
+        val hc = JSONArray()
+        hiddenCats.forEach { (k, n) -> hc.put(JSONArray().put(k).put(n)) }
+        hidden.put("items", hi).put("cats", hc)
+        root.put("hidden", hidden)
+
+        val fv = JSONObject()
+        fv.put("ts", ts("favs", favs.isNotEmpty()))
+        val fa = JSONArray()
+        favs.forEach { f -> fa.put(JSONObject().put("kind", f.kind).put("item", itemJson(f.item))) }
+        fv.put("list", fa)
+        root.put("favs", fv)
+
+        val pl = JSONObject()
+        pl.put("ts", ts("playlists", playlists.isNotEmpty()))
+        val pa = JSONArray()
+        playlists.forEach { p ->
+            val items = JSONArray()
+            p.items.forEach { m -> items.put(itemJson(m)) }
+            pa.put(JSONObject().put("name", p.name).put("items", items))
+        }
+        pl.put("list", pa)
+        root.put("playlists", pl)
+
+        val rs = JSONObject()
+        rs.put("ts", ts("resume", resumes.isNotEmpty()))
+        val ra = JSONArray()
+        resumes.forEach { r ->
+            ra.put(
+                JSONObject().put("kind", r.kind).put("url", r.url).put("title", r.title).put("img", r.img ?: "")
+                    .put("pos", r.pos).put("dur", r.dur).put("ts", r.ts)
+            )
+        }
+        rs.put("list", ra)
+        root.put("resume", rs)
+
+        val st = JSONObject()
+        st.put("ts", ts("settings", true))
+        st.put("freqContent", freqContent).put("freqEpg", freqEpg).put("autoNext", autoNext)
+        root.put("settings", st)
+        return root
+    }
+
+    private fun applySection(sec: String, o: JSONObject) {
+        when (sec) {
+            "hidden" -> {
+                setI.clear(); setC.clear(); hiddenItems.clear(); hiddenCats.clear()
+                val ai = o.optJSONArray("items")
+                if (ai != null) {
+                    for (i in 0 until ai.length()) {
+                        val p = ai.optJSONArray(i)
+                        if (p != null) { setI.add(p.optString(0)); hiddenItems[p.optString(0)] = p.optString(1) }
+                    }
+                }
+                val ac = o.optJSONArray("cats")
+                if (ac != null) {
+                    for (i in 0 until ac.length()) {
+                        val p = ac.optJSONArray(i)
+                        if (p != null) { setC.add(p.optString(0)); hiddenCats[p.optString(0)] = p.optString(1) }
+                    }
+                }
+                persistHidden()
+                hiddenVersion++
+            }
+            "favs" -> {
+                favs.clear()
+                val a = o.optJSONArray("list")
+                if (a != null) {
+                    for (i in 0 until a.length()) {
+                        val e = a.optJSONObject(i)
+                        val it0 = e?.optJSONObject("item")
+                        if (e != null && it0 != null) favs.add(Fav(e.optString("kind"), itemFromJson(it0)))
+                    }
+                }
+                persistFavs()
+            }
+            "playlists" -> {
+                playlists.clear()
+                val a = o.optJSONArray("list")
+                if (a != null) {
+                    for (i in 0 until a.length()) {
+                        val e = a.optJSONObject(i) ?: continue
+                        val items = ArrayList<Item>()
+                        val ia = e.optJSONArray("items")
+                        if (ia != null) {
+                            for (j in 0 until ia.length()) {
+                                val io = ia.optJSONObject(j)
+                                if (io != null) items.add(itemFromJson(io))
+                            }
+                        }
+                        playlists.add(Playlist(e.optString("name"), items))
+                    }
+                }
+                persistPlaylists()
+            }
+            "resume" -> {
+                resumes.clear()
+                val a = o.optJSONArray("list")
+                if (a != null) {
+                    for (i in 0 until a.length()) {
+                        val e = a.optJSONObject(i) ?: continue
+                        resumes.add(
+                            Resume(
+                                e.optString("kind"), e.optString("url"), e.optString("title"),
+                                e.optString("img").ifBlank { null }, e.optLong("pos"), e.optLong("dur"), e.optLong("ts")
+                            )
+                        )
+                    }
+                }
+                persistResume()
+            }
+            "settings" -> {
+                freqContent = o.optInt("freqContent", 1)
+                freqEpg = o.optInt("freqEpg", 1)
+                autoNext = o.optBoolean("autoNext", false)
+                prefs.edit().putInt("freq_content", freqContent).putInt("freq_epg", freqEpg)
+                    .putBoolean("auto_next", autoNext).apply()
+            }
+        }
+    }
+
+    /** Synchronise favoris, playlists, masqués, reprises et réglages avec les autres appareils du même compte. */
+    suspend fun syncCloud() {
+        if (!cloudOn || cloudBusy) return
+        cloudBusy = true
+        try {
+            cloudMsg = "Synchronisation…"
+            val pkey = Cloud.pointerKey(api.key)
+            var id = cloudId
+            if (id.isBlank()) {
+                val (c, found) = withContext(Dispatchers.IO) { Cloud.getPointer(pkey) }
+                if (c < 0) {
+                    cloudMsg = "Synchronisation indisponible (pas de réseau ?)"
+                    return
+                }
+                id = found ?: ""
+            }
+            var remote: JSONObject? = null
+            if (id.isNotBlank()) {
+                val (code, js) = withContext(Dispatchers.IO) { Cloud.getBlob(id) }
+                if (code == 200 && js != null) {
+                    remote = js
+                } else if (code == 404) {
+                    id = ""
+                } else {
+                    cloudMsg = "Synchronisation indisponible"
+                    return
+                }
+            }
+            val r = remote
+            if (r == null) {
+                // première synchronisation de ce compte : on crée l'espace partagé
+                val snap = buildSnapshot(true).toString()
+                val newId = withContext(Dispatchers.IO) { Cloud.createBlob(snap) }
+                if (newId == null) {
+                    cloudMsg = "Synchronisation indisponible"
+                    return
+                }
+                withContext(Dispatchers.IO) { Cloud.setPointer(pkey, newId) }
+                saveCloudId(newId)
+            } else {
+                saveCloudId(id)
+                var push = false
+                applying = true
+                try {
+                    for (sec in listOf("hidden", "favs", "playlists", "resume", "settings")) {
+                        val ro = r.optJSONObject(sec)
+                        val rts = ro?.optLong("ts") ?: 0L
+                        val lts = tsOf(sec)
+                        if (ro != null && rts > lts) {
+                            applySection(sec, ro)
+                            prefs.edit().putLong("ts_$sec", rts).apply()
+                        } else if (lts > rts) {
+                            push = true
+                        }
+                    }
+                } finally {
+                    applying = false
+                }
+                if (push) {
+                    val snap = buildSnapshot(false).toString()
+                    withContext(Dispatchers.IO) { Cloud.putBlob(id, snap) }
+                }
+            }
+            val now = System.currentTimeMillis()
+            cloudLast = now
+            prefs.edit().putLong("cloud_last", now).apply()
+            cloudMsg = "Synchronisé"
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            cloudMsg = "Synchronisation impossible"
+        } finally {
+            cloudBusy = false
+        }
+    }
+
+    /** Code saisi à la main (affiché dans Réglages d'un autre appareil). */
+    suspend fun useCloudCode(code: String) {
+        val id = code.filter { it.isDigit() }
+        if (id.length < 6) {
+            cloudMsg = "Code invalide"
+            return
+        }
+        saveCloudId(id)
+        withContext(Dispatchers.IO) { Cloud.setPointer(Cloud.pointerKey(api.key), id) }
+        syncCloud()
+    }
+
+    // ---------------- recherche, versions, tâches de fond ----------------
+    private val idx = ConcurrentHashMap<String, SearchIndex>()
+    private val idxToken = ConcurrentHashMap<String, Int>()
+    private val idxCounter = AtomicInteger()
+    private val bg = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /** Incrémenté à chaque reconstruction d'index : l'écran de recherche se relance tout seul. */
+    var searchVersion by mutableStateOf(0)
+        private set
+
+    /** Reconstruit l'index de recherche d'un type de contenu, en arrière-plan (jamais bloquant). */
+    private fun reindex(kind: String) {
+        val d = data[kind] ?: return
+        val token = idxCounter.incrementAndGet()
+        idxToken[kind] = token
+        bg.launch {
+            try {
+                val built = SearchIndex.build(d.all, kind != "live")
+                if (idxToken[kind] == token) {
+                    idx[kind] = built
+                    searchVersion++
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                /* on garde l'index précédent */
+            }
+        }
+    }
+
     suspend fun search(q: String): Triple<List<Item>, List<Item>, List<Item>> = withContext(Dispatchers.Default) {
-        val t = q.trim()
-        if (t.length < 2) {
+        if (q.isBlank()) {
             Triple(emptyList<Item>(), emptyList<Item>(), emptyList<Item>())
         } else {
-            fun find(k: String): List<Item> =
-                data[k]?.all?.filter { it.name.contains(t, ignoreCase = true) }?.take(200) ?: emptyList()
-            Triple(find("live"), find("vod"), find("series"))
+            Triple(findIn("live", q), findIn("vod", q), findIn("series", q))
+        }
+    }
+
+    private fun findIn(kind: String, q: String): List<Item> {
+        val ix = idx[kind] ?: return emptyList()
+        return ix.search(q, 200) { !isHidden(kind, it) }
+    }
+
+    /** Autres versions (doublons confirmés par le titre et l'année) d'un film ou d'une série. */
+    fun versionsOf(kind: String, item: Item): List<Item> = idx[kind]?.versionsOf(item) ?: listOf(item)
+
+    private val peopleCache = object : LinkedHashMap<String, List<TmCredit>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<TmCredit>>?): Boolean = size > 20
+    }
+
+    /** Recherche par acteur / réalisateur (TMDB) : films et séries locaux de leur filmographie. */
+    suspend fun searchPeople(q: String): Pair<List<Item>, List<Item>> {
+        val none = Pair(emptyList<Item>(), emptyList<Item>())
+        val key = tmdbKey
+        val qn = Txt.fold(q)
+        if (key.isBlank() || qn.length < 4) return none
+        val cr: List<TmCredit> = synchronized(peopleCache) { peopleCache[qn] }
+            ?: Tmdb.personCredits(key, q).also { fresh ->
+                if (fresh.isNotEmpty()) synchronized(peopleCache) { peopleCache[qn] = fresh }
+            }
+        if (cr.isEmpty()) return none
+        return withContext(Dispatchers.Default) {
+            val v = idx["vod"]?.matchCredits(cr, false) { !isHidden("vod", it) } ?: emptyList()
+            val sr = idx["series"]?.matchCredits(cr, true) { !isHidden("series", it) } ?: emptyList()
+            Pair(v, sr)
+        }
+    }
+
+    /** Pas de téléchargement lourd en arrière-plan pendant qu'on regarde une vidéo. */
+    private suspend fun waitWhilePlaying() {
+        var n = 0
+        while (Zap.playing && n < 900) {
+            delay(2000)
+            n++
+        }
+    }
+
+    // Guide TV court d'une chaîne : mis en cache et limité à 3 requêtes simultanées (plus de requêtes répétées au défilement)
+    private val shortEpgCache = ConcurrentHashMap<String, Pair<Long, List<Prog>>>()
+    private val epgGate = Semaphore(3)
+
+    fun cachedShortEpg(streamId: String): List<Prog>? {
+        val e = shortEpgCache[streamId] ?: return null
+        val ttl = if (e.second.isEmpty()) 60_000L else 300_000L
+        return if (System.currentTimeMillis() - e.first < ttl) e.second else null
+    }
+
+    suspend fun shortEpg(streamId: String): List<Prog> {
+        cachedShortEpg(streamId)?.let { return it }
+        return epgGate.withPermit {
+            cachedShortEpg(streamId) ?: api.epg(streamId).also {
+                shortEpgCache[streamId] = Pair(System.currentTimeMillis(), it)
+            }
         }
     }
 }

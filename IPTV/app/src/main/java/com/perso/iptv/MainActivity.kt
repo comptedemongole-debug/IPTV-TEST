@@ -84,6 +84,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -126,6 +127,8 @@ private fun play(
     if (kind != "series") Zap.eps = emptyList()
     // sans transmission, on libère l'aperçu avant de lancer (une seule connexion chez le fournisseur)
     if (handoffId == null) Preview.release()
+    // la vidéo a besoin de la mémoire : on libère les images de l'appli (rechargées depuis le disque au retour)
+    if (Zap.repo?.autoBoost == true) Booster.trimOwnCaches(ctx.applicationContext)
     ctx.startActivity(
         Intent(ctx, PlayerActivity::class.java)
             .putExtra("url", url).putExtra("title", title).putExtra("live", live)
@@ -133,12 +136,12 @@ private fun play(
     )
 }
 
-private fun setZapEpisodes(api: Xtream, series: Item, list: List<Ep>, current: Ep, tm: Map<String, Map<Int, TmEp>>) {
+private fun setZapEpisodes(api: Xtream, series: Item, list: List<Ep>, current: Ep, tm: Map<String, Map<Int, TmEp>>, srcId: String = series.id) {
     Zap.eps = list.map { e ->
         val num = e.num.ifBlank { "?" }
         val tmName = tm[e.season]?.get(e.num.toIntOrNull() ?: -1)?.name
         val name = if (!tmName.isNullOrBlank()) tmName else cleanEpTitle(e.title, series.name, e.num)
-        EpEntry(api.epUrl(e.id, e.ext), "S${e.season} E$num · $name", "${series.name} · S${e.season} E$num", e.img ?: series.img, e.season)
+        EpEntry(api.epUrl(e.id, e.ext), "S${e.season} E$num · $name", "${series.name} · S${e.season} E$num", e.img ?: series.img, e.season, srcId, e.num)
     }
     Zap.epIndex = list.indexOf(current).coerceAtLeast(0)
 }
@@ -238,7 +241,6 @@ fun Splash() {
             Logo(110.dp)
             Spacer(Modifier.height(16.dp))
             Text("Kinéo", fontSize = 44.sp, fontWeight = FontWeight.ExtraBold, color = TXT)
-            Text("Ta télé. Ton rythme.", fontSize = 14.sp, color = MUTED)
         }
     }
 }
@@ -363,13 +365,10 @@ fun Home(api: Xtream, logout: () -> Unit) {
         try {
             Zap.repo = repo
             Zap.api = api
-            launch(Dispatchers.IO) {
-                delay(4000)
-                if (repo.autoBoost) Booster.boost(ctx.applicationContext)
-            }
             repo.loadCache()
             cacheLoaded = true
             val fullJob = launch { repo.loadFull() }
+            launch { repo.syncCloud() }
             repo.refreshContent(false)
             fullJob.join()
             repo.syncEpgIfDue()
@@ -422,7 +421,7 @@ fun Home(api: Xtream, logout: () -> Unit) {
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(BG_TOP, BG)))) {
             if (tab == 1 || tab == 2) HeroBackdrop(hero)
             Column(Modifier.fillMaxSize()) {
-                TopBar(tab, { tab = it }, repo.status)
+                TopBar(tab, { tab = it }) { repo.status }
                 Box(Modifier.fillMaxSize().graphicsLayer { alpha = pageAlpha.value }) {
                 when {
                     tab == 3 -> SearchScreen(repo, openItem)
@@ -532,7 +531,8 @@ fun Backdrop(url: String?) {
 }
 
 @Composable
-fun TopBar(tab: Int, onTab: (Int) -> Unit, status: String) {
+fun TopBar(tab: Int, onTab: (Int) -> Unit, statusText: () -> String) {
+    val status = statusText()
     var time by remember { mutableStateOf(clock()) }
     LaunchedEffect(Unit) { while (true) { time = clock(); delay(20_000) } }
     Row(
@@ -787,7 +787,8 @@ fun Poster(item: Item, ratio: Float, fit: Boolean, onFocus: (Item) -> Unit, prog
     val pctx = LocalContext.current
     val req = remember(item.img, perf) {
         ImageRequest.Builder(pctx).data(lightImg(item.img, if (perf) "w185" else "w342"))
-            .size(if (perf) 220 else 300, if (perf) 330 else 450).crossfade(if (perf) 0 else 150).build()
+            .size(if (perf) 220 else 300, if (perf) 330 else 450).crossfade(if (perf) 0 else 150)
+            .allowRgb565(perf).build()
     }
     Box(
         Modifier.width(124.dp).graphicsLayer { scaleX = sc.value; scaleY = sc.value }
@@ -846,14 +847,21 @@ fun DetailScreen(
     var info by remember(item.id) { mutableStateOf<Info?>(null) }
     var eps by remember(item.id) { mutableStateOf<List<Ep>?>(null) }
     var season by remember(item.id) { mutableStateOf("") }
-    LaunchedEffect(item.id) {
+    // Version (source) choisie parmi les doublons du même film / de la même série
+    var src by remember(item.id) { mutableStateOf(item) }
+    val versions = remember(item.id, repo.searchVersion) {
+        if (kind == "vod" || kind == "series") repo.versionsOf(kind, item) else listOf(item)
+    }
+    var showVersions by remember(item.id) { mutableStateOf(false) }
+    LaunchedEffect(src.id) {
+        if (src.id != item.id) { eps = null; info = null; season = "" }
         try {
             if (kind == "series") {
-                val (i, e) = api.seriesDetail(item.id)
+                val (i, e) = api.seriesDetail(src.id)
                 info = i
                 eps = e
             } else {
-                info = api.vodInfo(item.id)
+                info = api.vodInfo(src.id)
             }
         } catch (e: CancellationException) {
             throw e
@@ -872,14 +880,20 @@ fun DetailScreen(
     val inf = info
     val plot = (inf?.plot ?: "").ifBlank { item.plot }.ifBlank { tmMv?.overview ?: "" }
     val backdrop = inf?.backdrop ?: item.backdrop ?: tmMv?.backdrop ?: item.img
-    val vodUrl = api.vodUrl(item.id, item.ext)
+    val vodUrl = api.vodUrl(src.id, src.ext)
     val playVod: (Long) -> Unit = { st ->
-        setVodQueue(repo, item)
+        setVodQueue(repo, src)
         onPlay(vodUrl, item.name, item.img, "vod", st)
     }
     var showAdd by remember(item.id) { mutableStateOf(false) }
     if (showAdd) AddToPlaylistDialog(repo, item) { showAdd = false }
-    val resume = if (kind == "vod") repo.resumeFor(vodUrl) else null
+    if (showVersions) {
+        VersionsDialog(repo, api, kind, versions, src, { src = it; showVersions = false }) { showVersions = false }
+    }
+    // la reprise de lecture suit le film, quelle que soit la version regardée
+    val resume = if (kind == "vod") {
+        repo.resumeFor(vodUrl) ?: versions.firstNotNullOfOrNull { repo.resumeFor(api.vodUrl(it.id, it.ext)) }
+    } else null
     val fav = repo.isFav(kind, item)
     val meta = listOfNotNull(
         item.rating.ifBlank { tmMv?.rating ?: "" }.takeIf { it.isNotBlank() && it != "0" && it != "0.0" }?.let { "★ $it" },
@@ -938,10 +952,11 @@ fun DetailScreen(
                         } else {
                             ActionButton("▶ Lecture", true) { playVod(0L) }
                         }
+                        if (versions.size > 1) ActionButton("Versions (${versions.size})", false) { showVersions = true }
                     } else {
                         eps?.firstOrNull()?.let { e1 ->
                             ActionButton("▶ Lecture S${e1.season} E${e1.num.ifBlank { "1" }}", true) {
-                                eps?.let { setZapEpisodes(api, item, it, e1, tm) }
+                                eps?.let { setZapEpisodes(api, item, it, e1, tm, src.id) }
                                 onPlay(
                                     api.epUrl(e1.id, e1.ext),
                                     "${item.name} · S${e1.season} E${e1.num.ifBlank { "1" }}",
@@ -950,7 +965,12 @@ fun DetailScreen(
                                 )
                             }
                         }
+                        if (versions.size > 1) ActionButton("Versions (${versions.size})", false) { showVersions = true }
                     }
+                }
+                if (src.id != item.id) {
+                    Spacer(Modifier.height(6.dp))
+                    Text("Version choisie : ${Versions.label(src)}", fontSize = 12.sp, color = MUTED, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -983,7 +1003,7 @@ fun DetailScreen(
                     LazyColumn(Modifier.fillMaxSize()) {
                         items(list.filter { it.season == sSel }) { ep ->
                             EpisodeRow(repo, api, item, ep, tm[sSel]?.get(ep.num.toIntOrNull() ?: -1)) { u, t, i, k, st ->
-                                setZapEpisodes(api, item, list, ep, tm)
+                                setZapEpisodes(api, item, list, ep, tm, src.id)
                                 onPlay(u, t, i, k, st)
                             }
                         }
@@ -992,6 +1012,61 @@ fun DetailScreen(
             }
         }
     }
+}
+
+@Composable
+fun VersionRow(title: String, sub: String, selected: Boolean, onClick: () -> Unit) {
+    var f by remember { mutableStateOf(false) }
+    Column(
+        Modifier.fillMaxWidth()
+            .onFocusChanged { f = it.isFocused }
+            .background(if (f) Color(0x44FFFFFF) else Color.Transparent, RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    ) {
+        Text(
+            (if (selected) "▶  " else "") + title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+            color = if (selected) ACCENT else TXT, maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+        if (sub.isNotBlank()) Text(sub, fontSize = 12.sp, color = MUTED, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** Liste des versions d'un même film / d'une même série, avec uniquement les informations réellement détectées. */
+@Composable
+fun VersionsDialog(
+    repo: Repo, api: Xtream, kind: String, versions: List<Item>, current: Item,
+    onPick: (Item) -> Unit, onDismiss: () -> Unit
+) {
+    val details = remember { mutableStateMapOf<String, VersionDetail>() }
+    LaunchedEffect(versions) {
+        coroutineScope {
+            versions.forEach { v ->
+                launch {
+                    val cat = repo.data[kind]?.cats?.firstOrNull { it.id == v.cat }?.name ?: ""
+                    details[v.id] = Versions.describe(api, kind, v, cat)
+                }
+            }
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Versions disponibles", color = TXT) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                versions.forEach { v ->
+                    val d = details[v.id]
+                    VersionRow(
+                        d?.line ?: Versions.label(v),
+                        d?.sub ?: "Analyse en cours…",
+                        v.id == current.id
+                    ) { onPick(v) }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Fermer") } }
+    )
 }
 
 @Composable
@@ -1013,8 +1088,11 @@ fun EpisodeRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(Modifier.width(128.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp)).background(Color(0xFF1C1C24))) {
+            val ectx = LocalContext.current
+            val epImg = ep.img ?: tm?.still ?: series.img
+            val epReq = remember(epImg) { ImageRequest.Builder(ectx).data(epImg).size(384, 216).build() }
             AsyncImage(
-                model = ep.img ?: tm?.still ?: series.img, contentDescription = null,
+                model = epReq, contentDescription = null,
                 contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()
             )
             if (r != null && r.dur > 0) {
@@ -1094,8 +1172,11 @@ fun ChannelRow(repo: Repo, ch: Item, num: Int, ev: Int, onFocus: () -> Unit, onC
     val progs = if (cached.isNotEmpty()) cached else fb
     LaunchedEffect(ch.id, ev) {
         if (repo.progsFor(ch).isEmpty()) {
-            delay(250)
-            fb = repo.api.epg(ch.id)
+            val c = repo.cachedShortEpg(ch.id)
+            if (c != null) fb = c else {
+                delay(250)
+                fb = repo.shortEpg(ch.id)
+            }
         }
     }
     val nowS = System.currentTimeMillis() / 1000
@@ -1109,7 +1190,9 @@ fun ChannelRow(repo: Repo, ch: Item, num: Int, ev: Int, onFocus: () -> Unit, onC
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text("$num", color = MUTED, fontSize = 13.sp, modifier = Modifier.width(36.dp))
-        AsyncImage(model = ch.img, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.size(40.dp))
+        val lctx = LocalContext.current
+        val logo = remember(ch.img) { ImageRequest.Builder(lctx).data(ch.img).size(96, 96).build() }
+        AsyncImage(model = logo, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.size(40.dp))
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
             Text(ch.name, color = TXT, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1130,8 +1213,11 @@ fun ChannelPanel(
     var fb by remember(ch?.id) { mutableStateOf<List<Prog>>(emptyList()) }
     LaunchedEffect(ch?.id, ev) {
         if (ch != null && repo.progsFor(ch).isEmpty()) {
-            delay(300)
-            fb = repo.api.epg(ch.id)
+            val c = repo.cachedShortEpg(ch.id)
+            if (c != null) fb = c else {
+                delay(300)
+                fb = repo.shortEpg(ch.id)
+            }
         }
     }
     val cached = if (ch != null) repo.progsFor(ch) else emptyList()
@@ -1388,14 +1474,33 @@ fun AddToPlaylistDialog(repo: Repo, item: Item, onDone: () -> Unit) {
 fun SearchScreen(repo: Repo, open: (String, Item, List<Item>, Int) -> Unit) {
     var q by remember { mutableStateOf("") }
     var sel by remember { mutableStateOf("vod") }
-    var res by remember {
+    val fr = remember { FocusRequester() }
+    val focus = LocalFocusManager.current
+    LaunchedEffect(Unit) { fr.requestFocus() }
+    // Recherche en direct : à chaque lettre, sans délai (l'index local répond en quelques millisecondes ;
+    // une nouvelle lettre annule automatiquement le calcul précédent). Se relance aussi quand l'index est reconstruit.
+    val indexVersion = repo.searchVersion
+    var local by remember {
         mutableStateOf(Triple<List<Item>, List<Item>, List<Item>>(emptyList(), emptyList(), emptyList()))
     }
-    val fr = remember { FocusRequester() }
-    LaunchedEffect(Unit) { fr.requestFocus() }
+    var people by remember { mutableStateOf(Pair<List<Item>, List<Item>>(emptyList(), emptyList())) }
+    LaunchedEffect(q, indexVersion) { local = repo.search(q) }
+    // Acteurs / réalisateurs (TMDB) : seul ce complément réseau est légèrement différé
     LaunchedEffect(q) {
-        delay(200)
-        res = repo.search(q)
+        people = Pair(emptyList(), emptyList())
+        if (q.trim().length >= 4) {
+            delay(450)
+            people = repo.searchPeople(q)
+        }
+    }
+    val res = remember(local, people) {
+        val ids2 = local.second.mapTo(HashSet<String>()) { it.id }
+        val ids3 = local.third.mapTo(HashSet<String>()) { it.id }
+        Triple(
+            local.first,
+            local.second + people.first.filter { it.id !in ids2 },
+            local.third + people.second.filter { it.id !in ids3 }
+        )
     }
     val lists = mapOf("live" to res.first, "vod" to res.second, "series" to res.third)
     LaunchedEffect(res) {
@@ -1412,6 +1517,8 @@ fun SearchScreen(repo: Repo, open: (String, Item, List<Item>, Int) -> Unit) {
         ) {
             TextField(
                 value = q, onValueChange = { q = it }, singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { focus.moveFocus(FocusDirection.Down) }),
                 placeholder = { Text("Rechercher une chaîne, un film, une série…", color = Color(0xFF666677)) },
                 shape = RoundedCornerShape(28.dp),
                 colors = TextFieldDefaults.colors(
@@ -1552,12 +1659,10 @@ fun SettingsScreen(repo: Repo, scope: CoroutineScope, logout: () -> Unit) {
             fontSize = 13.sp, color = MUTED
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            ActionButton("Libérer la mémoire maintenant", false) {
-                scope.launch {
-                    val gain = withContext(Dispatchers.IO) { Booster.boost(appCtx) }
-                    sys = Booster.info(appCtx)
-                    perfMsg = "Mémoire libérée : ${if (gain > 0) gain else 0} Mo"
-                }
+            ActionButton("Libérer la mémoire de l'appli", false) {
+                val gain = Booster.trimOwnCaches(appCtx)
+                sys = Booster.info(appCtx)
+                perfMsg = "Mémoire de l'appli libérée : $gain Mo (les autres applis ne sont pas touchées)"
             }
             ActionButton("Vider le cache des images", false) {
                 scope.launch {
@@ -1570,7 +1675,7 @@ fun SettingsScreen(repo: Repo, scope: CoroutineScope, logout: () -> Unit) {
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Pill((if (repo.autoBoost) "✓ " else "✕ ") + "Libérer la mémoire à chaque ouverture", repo.autoBoost) {
+            Pill((if (repo.autoBoost) "✓ " else "✕ ") + "Libérer la mémoire de l'appli avant chaque lecture", repo.autoBoost) {
                 repo.updateAutoBoost(!repo.autoBoost)
             }
             Pill((if (repo.perf) "✓ " else "✕ ") + "Mode performance", repo.perf) { repo.updatePerf(!repo.perf) }
@@ -1581,8 +1686,17 @@ fun SettingsScreen(repo: Repo, scope: CoroutineScope, logout: () -> Unit) {
             }
             Pill((if (repo.preview) "✓ " else "✕ ") + "Aperçu des chaînes", repo.preview) { repo.updatePreview(!repo.preview) }
         }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Pill((if (repo.pcmAudio) "✓ " else "✕ ") + "Son : forcer le décodage (si pas de son)", repo.pcmAudio) {
+                repo.updatePcmAudio(!repo.pcmAudio)
+            }
+        }
         Text(
-            "Mode performance : pas d'images de fond ni d'animations, affiches plus légères. À activer si ça rame encore.",
+            "À activer seulement si tu n'as pas de son sur cet appareil (Chromecast…). Autre solution côté Chromecast : Paramètres, Affichage et son, Son surround, Jamais. Pendant la lecture : bouton Prog, puis « Piste audio ».",
+            fontSize = 12.sp, color = MUTED
+        )
+        Text(
+            "Mode performance : pas d'images de fond ni d'animations, images en basse consommation, tampon vidéo plus court, moins de mémoire utilisée. À activer si ça rame encore.",
             fontSize = 12.sp, color = MUTED
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1598,6 +1712,39 @@ fun SettingsScreen(repo: Repo, scope: CoroutineScope, logout: () -> Unit) {
         if (perfMsg.isNotBlank()) Text(perfMsg, fontSize = 13.sp, color = ACCENT)
         Text(
             "Pour aller plus loin : désactive les applis inutiles dans « Applications », puis dans les options pour les développeurs mets les échelles d'animation sur 0,5x ou désactivées.",
+            fontSize = 12.sp, color = MUTED
+        )
+        Spacer(Modifier.height(8.dp))
+        Text("Synchronisation entre appareils", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = TXT)
+        var codeIn by remember { mutableStateOf("") }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Pill((if (repo.cloudOn) "✓ " else "✕ ") + "Synchroniser (TCL, Chromecast…)", repo.cloudOn) {
+                repo.updateCloudOn(!repo.cloudOn)
+            }
+            ActionButton("Synchroniser maintenant", false) { scope.launch { repo.syncCloud() } }
+        }
+        Text(
+            if (repo.cloudMsg.isNotBlank()) repo.cloudMsg
+            else if (repo.cloudLast > 0) "Dernière synchro : ${fmtDate(repo.cloudLast)}"
+            else "Pas encore synchronisé",
+            fontSize = 13.sp, color = ACCENT
+        )
+        if (repo.cloudId.isNotBlank()) {
+            Text(
+                "Code de cet espace : ${repo.cloudId}  (si l'autre appareil ne retrouve pas tout seul, saisis ce code dessous)",
+                fontSize = 12.sp, color = MUTED
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                codeIn, { codeIn = it }, singleLine = true,
+                placeholder = { Text("Code d'un autre appareil") },
+                modifier = Modifier.width(300.dp)
+            )
+            ActionButton("Utiliser ce code", false) { scope.launch { repo.useCloudCode(codeIn) } }
+        }
+        Text(
+            "Synchronisés : favoris, playlists, éléments masqués, reprises de lecture, mise à jour et lecture automatique. Stockés sur un service public (jsonblob.com), repérés par un identifiant secret. Tes identifiants IPTV ne sont jamais envoyés. L'aperçu, le mode performance et le son restent propres à chaque appareil.",
             fontSize = 12.sp, color = MUTED
         )
         Spacer(Modifier.height(8.dp))

@@ -25,7 +25,10 @@ data class Ep(
 )
 data class Info(
     val plot: String, val year: String, val duration: String, val genre: String, val backdrop: String?,
-    val cast: String = "", val director: String = "", val tmdb: String = ""
+    val cast: String = "", val director: String = "", val tmdb: String = "",
+    // Caractéristiques techniques lues dans la réponse du serveur (0 / vide = non communiqué)
+    val width: Int = 0, val height: Int = 0, val vcodec: String = "", val acodec: String = "",
+    val channels: Int = 0, val bitrate: Int = 0
 )
 data class Prog(val title: String, val start: Long, val stop: Long)
 
@@ -152,11 +155,19 @@ class Xtream(server: String, private val user: String, private val pass: String)
         )
     }
 
+    /** Fiches déjà demandées : naviguer d'un film à l'autre ou revenir en arrière ne refait pas la requête. */
+    private val infoCache = object : LinkedHashMap<String, Info>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Info>?): Boolean = size > 300
+    }
+
     suspend fun vodInfo(id: String): Info? = withContext(Dispatchers.IO) {
+        synchronized(infoCache) { infoCache[id] }?.let { return@withContext it }
         try {
             val o = JSONObject(call("action=get_vod_info&vod_id=$id")).optJSONObject("info")
                 ?: return@withContext null
-            Info(
+            val v = o.optJSONObject("video")
+            val a = o.optJSONObject("audio")
+            val info = Info(
                 o.str("plot").ifBlank { o.str("description") },
                 o.str("releasedate").ifBlank { o.str("release_date") }.take(4),
                 o.str("duration"),
@@ -164,10 +175,38 @@ class Xtream(server: String, private val user: String, private val pass: String)
                 o.firstOf("backdrop_path"),
                 o.str("cast").ifBlank { o.str("actors") },
                 o.str("director"),
-                o.str("tmdb_id").ifBlank { o.str("tmdb") }
+                o.str("tmdb_id").ifBlank { o.str("tmdb") },
+                width = v?.optInt("width", 0) ?: 0,
+                height = v?.optInt("height", 0) ?: 0,
+                vcodec = v?.str("codec_name") ?: "",
+                acodec = a?.str("codec_name") ?: "",
+                channels = a?.optInt("channels", 0) ?: 0,
+                bitrate = o.optInt("bitrate", 0)
             )
+            synchronized(infoCache) { infoCache[id] = info }
+            info
         } catch (e: Exception) {
             null
+        }
+    }
+
+    /**
+     * Teste si un flux répond (demande d'1 seul octet, connexion refermée aussitôt).
+     * Retourne le code HTTP, ou -1 si le serveur est injoignable.
+     */
+    suspend fun probe(url: String): Int = withContext(Dispatchers.IO) {
+        var c: HttpURLConnection? = null
+        try {
+            c = URL(url).openConnection() as HttpURLConnection
+            c.connectTimeout = 6000
+            c.readTimeout = 6000
+            c.setRequestProperty("Range", "bytes=0-0")
+            c.setRequestProperty("User-Agent", "Mozilla/5.0")
+            c.responseCode
+        } catch (e: Exception) {
+            -1
+        } finally {
+            try { c?.disconnect() } catch (e: Exception) { /* ignoré */ }
         }
     }
 

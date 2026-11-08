@@ -10,8 +10,8 @@ android {
         applicationId = "com.perso.iptv"
         minSdk = 23
         targetSdk = 34
-        versionCode = 18
-        versionName = "3.2"
+        versionCode = 20
+        versionName = "3.4"
     }
     signingConfigs {
         getByName("debug") {
@@ -47,5 +47,8 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.3.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.3.1")
     implementation("androidx.media3:media3-ui:1.3.1")
+    // Décodeur audio logiciel (AC3 / E-AC3 / DTS / TrueHD...) pour les appareils sans décodeur matériel (Chromecast Google TV).
+    // Même version que Media3 (1.3.1). Utilisé uniquement en dernier recours : voir Audio.kt.
+    implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.3.1+2")
     implementation("io.coil-kt:coil-compose:2.6.0")
 }

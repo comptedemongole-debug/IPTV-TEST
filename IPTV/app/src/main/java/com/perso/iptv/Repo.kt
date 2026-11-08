@@ -120,6 +120,11 @@ class Repo(private val ctx: Context, val api: Xtream) {
     var freqContent by mutableStateOf(prefs.getInt("freq_content", 1))
         private set
     var freqEpg by mutableStateOf(prefs.getInt("freq_epg", 1))
+        private set
+    var lastContentTs by mutableStateOf(prefs.getLong("sync_ts", 0L))
+        private set
+    var lastEpgTs by mutableStateOf(prefs.getLong("epg_ts", 0L))
+        private set
 
     init {
         // v3.4 : mise à jour quotidienne (remise à « chaque jour » une seule fois)
@@ -129,11 +134,6 @@ class Repo(private val ctx: Context, val api: Xtream) {
             prefs.edit().putInt("freq_content", 1).putInt("freq_epg", 1).putBoolean("daily34", true).apply()
         }
     }
-        private set
-    var lastContentTs by mutableStateOf(prefs.getLong("sync_ts", 0L))
-        private set
-    var lastEpgTs by mutableStateOf(prefs.getLong("epg_ts", 0L))
-        private set
 
     var tmdbKey by mutableStateOf(prefs.getString("tmdb_key", null) ?: readAssetKey())
         private set

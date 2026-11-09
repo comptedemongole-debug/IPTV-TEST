@@ -84,7 +84,6 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -729,7 +728,7 @@ fun Browse(
             if (resumes.isNotEmpty()) {
                 item {
                     Text(
-                        "Reprendre la lecture", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
+                        "Continuer à regarder", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
                         modifier = Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp)
                     )
                     LazyRow(
@@ -847,14 +846,20 @@ fun Poster(item: Item, ratio: Float, fit: Boolean, onFocus: (Item) -> Unit, prog
                     .background(Color(0xCC000000)).padding(6.dp)
             )
         }
-        val q = remember(item.name) { Versions.quality(item.name) }
-        if (!fit && q.isNotEmpty()) {
-            Text(
-                q, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White,
-                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)
-                    .background(Color(0xCC000000), RoundedCornerShape(50))
-                    .padding(horizontal = 7.dp, vertical = 2.dp)
-            )
+        val badges = remember(item.name) { Quality.badges(item.name) }
+        if (!fit && badges.isNotEmpty()) {
+            Row(
+                Modifier.align(Alignment.BottomStart).padding(start = 8.dp, bottom = if (progress >= 0f) 18.dp else 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                badges.forEach { b ->
+                    Text(
+                        b, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White,
+                        modifier = Modifier.background(Color(0xCC000000), RoundedCornerShape(50))
+                            .padding(horizontal = 7.dp, vertical = 2.dp)
+                    )
+                }
+            }
         }
         if (!fit && item.lang.isNotBlank()) {
             Text(
@@ -876,21 +881,14 @@ fun DetailScreen(
     var info by remember(item.id) { mutableStateOf<Info?>(null) }
     var eps by remember(item.id) { mutableStateOf<List<Ep>?>(null) }
     var season by remember(item.id) { mutableStateOf("") }
-    // Version (source) choisie parmi les doublons du même film / de la même série
-    var src by remember(item.id) { mutableStateOf(item) }
-    val versions = remember(item.id, repo.searchVersion) {
-        if (kind == "vod" || kind == "series") repo.versionsOf(kind, item) else listOf(item)
-    }
-    var showVersions by remember(item.id) { mutableStateOf(false) }
-    LaunchedEffect(src.id) {
-        if (src.id != item.id) { eps = null; info = null; season = "" }
+    LaunchedEffect(item.id) {
         try {
             if (kind == "series") {
-                val (i, e) = api.seriesDetail(src.id)
+                val (i, e) = api.seriesDetail(item.id)
                 info = i
                 eps = e
             } else {
-                info = api.vodInfo(src.id)
+                info = api.vodInfo(item.id)
             }
         } catch (e: CancellationException) {
             throw e
@@ -909,20 +907,14 @@ fun DetailScreen(
     val inf = info
     val plot = (inf?.plot ?: "").ifBlank { item.plot }.ifBlank { tmMv?.overview ?: "" }
     val backdrop = inf?.backdrop ?: item.backdrop ?: tmMv?.backdrop ?: item.img
-    val vodUrl = api.vodUrl(src.id, src.ext)
+    val vodUrl = api.vodUrl(item.id, item.ext)
     val playVod: (Long) -> Unit = { st ->
-        setVodQueue(repo, src)
+        setVodQueue(repo, item)
         onPlay(vodUrl, item.name, item.img, "vod", st)
     }
     var showAdd by remember(item.id) { mutableStateOf(false) }
     if (showAdd) AddToPlaylistDialog(repo, item) { showAdd = false }
-    if (showVersions) {
-        VersionsDialog(repo, api, kind, versions, src, { src = it; showVersions = false }) { showVersions = false }
-    }
-    // la reprise de lecture suit le film, quelle que soit la version regardée
-    val resume = if (kind == "vod") {
-        repo.resumeFor(vodUrl) ?: versions.firstNotNullOfOrNull { repo.resumeFor(api.vodUrl(it.id, it.ext)) }
-    } else null
+    val resume = if (kind == "vod") repo.resumeFor(vodUrl) else null
     val fav = repo.isFav(kind, item)
     val meta = listOfNotNull(
         item.rating.ifBlank { tmMv?.rating ?: "" }.takeIf { it.isNotBlank() && it != "0" && it != "0.0" }?.let { "★ $it" },
@@ -981,11 +973,10 @@ fun DetailScreen(
                         } else {
                             ActionButton("▶ Lecture", true) { playVod(0L) }
                         }
-                        if (versions.size > 1) ActionButton("Versions (${versions.size})", false) { showVersions = true }
                     } else {
                         eps?.firstOrNull()?.let { e1 ->
                             ActionButton("▶ Lecture S${e1.season} E${e1.num.ifBlank { "1" }}", true) {
-                                eps?.let { setZapEpisodes(api, item, it, e1, tm, src.id) }
+                                eps?.let { setZapEpisodes(api, item, it, e1, tm) }
                                 onPlay(
                                     api.epUrl(e1.id, e1.ext),
                                     "${item.name} · S${e1.season} E${e1.num.ifBlank { "1" }}",
@@ -994,12 +985,7 @@ fun DetailScreen(
                                 )
                             }
                         }
-                        if (versions.size > 1) ActionButton("Versions (${versions.size})", false) { showVersions = true }
                     }
-                }
-                if (src.id != item.id) {
-                    Spacer(Modifier.height(6.dp))
-                    Text("Version choisie : ${Versions.label(src)}", fontSize = 12.sp, color = MUTED, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1032,7 +1018,7 @@ fun DetailScreen(
                     LazyColumn(Modifier.fillMaxSize()) {
                         items(list.filter { it.season == sSel }) { ep ->
                             EpisodeRow(repo, api, item, ep, tm[sSel]?.get(ep.num.toIntOrNull() ?: -1)) { u, t, i, k, st ->
-                                setZapEpisodes(api, item, list, ep, tm, src.id)
+                                setZapEpisodes(api, item, list, ep, tm)
                                 onPlay(u, t, i, k, st)
                             }
                         }
@@ -1041,61 +1027,6 @@ fun DetailScreen(
             }
         }
     }
-}
-
-@Composable
-fun VersionRow(title: String, sub: String, selected: Boolean, onClick: () -> Unit) {
-    var f by remember { mutableStateOf(false) }
-    Column(
-        Modifier.fillMaxWidth()
-            .onFocusChanged { f = it.isFocused }
-            .background(if (f) Color(0x44FFFFFF) else Color.Transparent, RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 8.dp)
-    ) {
-        Text(
-            (if (selected) "▶  " else "") + title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-            color = if (selected) ACCENT else TXT, maxLines = 1, overflow = TextOverflow.Ellipsis
-        )
-        if (sub.isNotBlank()) Text(sub, fontSize = 12.sp, color = MUTED, maxLines = 2, overflow = TextOverflow.Ellipsis)
-    }
-}
-
-/** Liste des versions d'un même film / d'une même série, avec uniquement les informations réellement détectées. */
-@Composable
-fun VersionsDialog(
-    repo: Repo, api: Xtream, kind: String, versions: List<Item>, current: Item,
-    onPick: (Item) -> Unit, onDismiss: () -> Unit
-) {
-    val details = remember { mutableStateMapOf<String, VersionDetail>() }
-    LaunchedEffect(versions) {
-        coroutineScope {
-            versions.forEach { v ->
-                launch {
-                    val cat = repo.data[kind]?.cats?.firstOrNull { it.id == v.cat }?.name ?: ""
-                    details[v.id] = Versions.describe(api, kind, v, cat)
-                }
-            }
-        }
-    }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Versions disponibles", color = TXT) },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                versions.forEach { v ->
-                    val d = details[v.id]
-                    VersionRow(
-                        d?.line ?: Versions.label(v),
-                        d?.sub ?: "Analyse en cours…",
-                        v.id == current.id
-                    ) { onPick(v) }
-                }
-            }
-        },
-        confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Fermer") } }
-    )
 }
 
 @Composable
@@ -1506,31 +1437,11 @@ fun SearchScreen(repo: Repo, open: (String, Item, List<Item>, Int) -> Unit) {
     val fr = remember { FocusRequester() }
     val focus = LocalFocusManager.current
     LaunchedEffect(Unit) { fr.requestFocus() }
-    // Recherche en direct : à chaque lettre, sans délai (l'index local répond en quelques millisecondes ;
-    // une nouvelle lettre annule automatiquement le calcul précédent). Se relance aussi quand l'index est reconstruit.
-    val indexVersion = repo.searchVersion
-    var local by remember {
+    // Recherche en direct : à chaque lettre, sans délai
+    var res by remember {
         mutableStateOf(Triple<List<Item>, List<Item>, List<Item>>(emptyList(), emptyList(), emptyList()))
     }
-    var people by remember { mutableStateOf(Pair<List<Item>, List<Item>>(emptyList(), emptyList())) }
-    LaunchedEffect(q, indexVersion) { local = repo.search(q) }
-    // Acteurs / réalisateurs (TMDB) : seul ce complément réseau est légèrement différé
-    LaunchedEffect(q) {
-        people = Pair(emptyList(), emptyList())
-        if (q.trim().length >= 4) {
-            delay(450)
-            people = repo.searchPeople(q)
-        }
-    }
-    val res = remember(local, people) {
-        val ids2 = local.second.mapTo(HashSet<String>()) { it.id }
-        val ids3 = local.third.mapTo(HashSet<String>()) { it.id }
-        Triple(
-            local.first,
-            local.second + people.first.filter { it.id !in ids2 },
-            local.third + people.second.filter { it.id !in ids3 }
-        )
-    }
+    LaunchedEffect(q) { res = repo.search(q) }
     val lists = mapOf("live" to res.first, "vod" to res.second, "series" to res.third)
     LaunchedEffect(res) {
         if (lists[sel].isNullOrEmpty()) {

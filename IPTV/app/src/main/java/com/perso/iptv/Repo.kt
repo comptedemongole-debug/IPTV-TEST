@@ -13,11 +13,9 @@ import org.json.JSONObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
 import org.xmlpull.v1.XmlPullParser
 import java.io.File
 import java.text.SimpleDateFormat
@@ -320,7 +318,6 @@ class Repo(private val ctx: Context, val api: Xtream) {
             }
             if (d != null) {
                 data[k] = d
-                reindex(k)
             } else {
                 // pas de fichier accueil (ancienne version) : lecture complète
                 val d2 = withContext(Dispatchers.IO) {
@@ -329,7 +326,6 @@ class Repo(private val ctx: Context, val api: Xtream) {
                 if (d2 != null) {
                     data[k] = d2
                     full.add(k)
-                    reindex(k)
                 }
             }
         }
@@ -339,7 +335,6 @@ class Repo(private val ctx: Context, val api: Xtream) {
         if (live != null) {
             data["live"] = live
             full.add("live")
-            reindex("live")
         }
         cacheDone = true
     }
@@ -355,7 +350,6 @@ class Repo(private val ctx: Context, val api: Xtream) {
             if (d != null && !full.contains(k)) {
                 data[k] = d
                 full.add(k)
-                reindex(k)
             }
         }
         val ep = withContext(Dispatchers.IO) {
@@ -388,7 +382,6 @@ class Repo(private val ctx: Context, val api: Xtream) {
         }
         data[kind] = d
         full.add(kind)
-        reindex(kind)
         prefs.edit().putLong("sync_$kind", System.currentTimeMillis()).apply()
     }
 
@@ -1022,7 +1015,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
                 } else if (code == 404) {
                     id = ""
                 } else {
-                    cloudMsg = "Synchronisation indisponible"
+                    cloudMsg = "Synchronisation indisponible (${Cloud.lastErr.ifBlank { "lecture refusée" }})"
                     return
                 }
             }
@@ -1032,7 +1025,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
                 val snap = buildSnapshot(true).toString()
                 val newId = withContext(Dispatchers.IO) { Cloud.createBlob(snap) }
                 if (newId == null) {
-                    cloudMsg = "Synchronisation indisponible"
+                    cloudMsg = "Synchronisation indisponible (${Cloud.lastErr.ifBlank { "création de l'espace refusée" }})"
                     return
                 }
                 withContext(Dispatchers.IO) { Cloud.setPointer(pkey, newId) }
@@ -1076,7 +1069,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
 
     /** Code saisi à la main (affiché dans Réglages d'un autre appareil). */
     suspend fun useCloudCode(code: String) {
-        val id = code.filter { it.isDigit() }
+        val id = code.trim().filter { it.isLetterOrDigit() || it == '-' }
         if (id.length < 6) {
             cloudMsg = "Code invalide"
             return
@@ -1086,76 +1079,15 @@ class Repo(private val ctx: Context, val api: Xtream) {
         syncCloud()
     }
 
-    // ---------------- recherche, versions, tâches de fond ----------------
-    private val idx = ConcurrentHashMap<String, SearchIndex>()
-    private val idxToken = ConcurrentHashMap<String, Int>()
-    private val idxCounter = AtomicInteger()
-    // un seul thread, priorité minimale : la construction de l'index ne ralentit jamais l'interface
-    private val bg = CoroutineScope(
-        SupervisorJob() + java.util.concurrent.Executors.newSingleThreadExecutor { r ->
-            Thread(r, "kineo-index").apply { priority = Thread.MIN_PRIORITY }
-        }.asCoroutineDispatcher()
-    )
-
-    /** Incrémenté à chaque reconstruction d'index : l'écran de recherche se relance tout seul. */
-    var searchVersion by mutableStateOf(0)
-        private set
-
-    /** Reconstruit l'index de recherche d'un type de contenu, en arrière-plan (jamais bloquant). */
-    private fun reindex(kind: String) {
-        val d = data[kind] ?: return
-        val token = idxCounter.incrementAndGet()
-        idxToken[kind] = token
-        bg.launch {
-            try {
-                val built = SearchIndex.build(d.all, kind != "live")
-                if (idxToken[kind] == token) {
-                    idx[kind] = built
-                    searchVersion++
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Throwable) {
-                /* on garde l'index précédent */
-            }
-        }
-    }
-
+    // ---------------- recherche ----------------
     suspend fun search(q: String): Triple<List<Item>, List<Item>, List<Item>> = withContext(Dispatchers.Default) {
-        if (q.isBlank()) {
+        val t = q.trim()
+        if (t.length < 2) {
             Triple(emptyList<Item>(), emptyList<Item>(), emptyList<Item>())
         } else {
-            Triple(findIn("live", q), findIn("vod", q), findIn("series", q))
-        }
-    }
-
-    private fun findIn(kind: String, q: String): List<Item> {
-        val ix = idx[kind] ?: return emptyList()
-        return ix.search(q, 500) { true }
-    }
-
-    /** Autres versions (doublons confirmés par le titre et l'année) d'un film ou d'une série. */
-    fun versionsOf(kind: String, item: Item): List<Item> = idx[kind]?.versionsOf(item) ?: listOf(item)
-
-    private val peopleCache = object : LinkedHashMap<String, List<TmCredit>>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<TmCredit>>?): Boolean = size > 20
-    }
-
-    /** Recherche par acteur / réalisateur (TMDB) : films et séries locaux de leur filmographie. */
-    suspend fun searchPeople(q: String): Pair<List<Item>, List<Item>> {
-        val none = Pair(emptyList<Item>(), emptyList<Item>())
-        val key = tmdbKey
-        val qn = Txt.fold(q)
-        if (key.isBlank() || qn.length < 4) return none
-        val cr: List<TmCredit> = synchronized(peopleCache) { peopleCache[qn] }
-            ?: Tmdb.personCredits(key, q).also { fresh ->
-                if (fresh.isNotEmpty()) synchronized(peopleCache) { peopleCache[qn] = fresh }
-            }
-        if (cr.isEmpty()) return none
-        return withContext(Dispatchers.Default) {
-            val v = idx["vod"]?.matchCredits(cr, false) { true } ?: emptyList()
-            val sr = idx["series"]?.matchCredits(cr, true) { true } ?: emptyList()
-            Pair(v, sr)
+            fun find(k: String): List<Item> =
+                data[k]?.all?.filter { it.name.contains(t, ignoreCase = true) }?.take(200) ?: emptyList()
+            Triple(find("live"), find("vod"), find("series"))
         }
     }
 

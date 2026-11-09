@@ -9,9 +9,6 @@ import java.net.URLEncoder
 
 data class TmEp(val name: String, val overview: String, val still: String?)
 
-/** Un titre de la filmographie d'une personne (acteur ou réalisateur). */
-class TmCredit(val title: String, val original: String, val year: String, val tv: Boolean)
-
 data class TmMovie(
     val overview: String, val backdrop: String?, val cast: String, val director: String,
     val genre: String, val year: String, val runtime: String, val rating: String
@@ -38,64 +35,6 @@ object Tmdb {
 
     fun clearCache() {
         synchronized(movieCache) { movieCache.clear() }
-    }
-
-    private fun date4(o: JSONObject, a: String, b: String): String =
-        o.optString(a, "").ifBlank { o.optString(b, "") }.take(4)
-
-    /** Films et séries d'un acteur ou d'un réalisateur dont le nom correspond à la saisie (TMDB). */
-    suspend fun personCredits(key: String, query: String): List<TmCredit> = withContext(Dispatchers.IO) {
-        try {
-            val q = URLEncoder.encode(query.trim(), "UTF-8")
-            val res = JSONObject(get("https://api.themoviedb.org/3/search/person?api_key=$key&language=fr-FR&query=$q"))
-                .optJSONArray("results") ?: return@withContext emptyList<TmCredit>()
-            val qt = Txt.fold(query).split(' ').filter { it.isNotEmpty() }
-            val out = ArrayList<TmCredit>()
-            var used = 0
-            for (i in 0 until res.length()) {
-                if (used >= 2) break
-                val p = res.getJSONObject(i)
-                val words = Txt.fold(p.optString("name")).split(' ')
-                // la saisie doit ressembler au nom de la personne (sinon « avatar » ramènerait n'importe qui)
-                if (qt.isEmpty() || !qt.all { t -> words.any { w -> w.startsWith(t) } }) continue
-                used++
-                val cr = JSONObject(
-                    get("https://api.themoviedb.org/3/person/${p.optInt("id")}/combined_credits?api_key=$key&language=fr-FR")
-                )
-                val rows = ArrayList<JSONObject>()
-                val cast = cr.optJSONArray("cast")
-                if (cast != null) for (j in 0 until cast.length()) rows.add(cast.getJSONObject(j))
-                val crew = cr.optJSONArray("crew")
-                if (crew != null) {
-                    for (j in 0 until crew.length()) {
-                        val c = crew.getJSONObject(j)
-                        if (c.optString("job") == "Director") rows.add(c)
-                    }
-                }
-                rows.sortByDescending { it.optDouble("popularity", 0.0) }
-                for (r in rows.take(150)) {
-                    val tv = r.optString("media_type") == "tv"
-                    val title = if (tv) r.optString("name", "") else r.optString("title", "")
-                    val orig = if (tv) r.optString("original_name", "") else r.optString("original_title", "")
-                    val year = if (tv) date4(r, "first_air_date", "release_date") else date4(r, "release_date", "first_air_date")
-                    if (title.isNotBlank() || orig.isNotBlank()) out.add(TmCredit(title, orig, year, tv))
-                }
-            }
-            out
-        } catch (e: Exception) {
-            emptyList()
-        }
-    }
-
-    suspend fun findTv(key: String, name: String): String? = withContext(Dispatchers.IO) {
-        try {
-            val q = URLEncoder.encode(name, "UTF-8")
-            val res = JSONObject(get("https://api.themoviedb.org/3/search/tv?api_key=$key&language=fr-FR&query=$q"))
-                .optJSONArray("results")
-            if (res != null && res.length() > 0) res.getJSONObject(0).optInt("id").toString() else null
-        } catch (e: Exception) {
-            null
-        }
     }
 
     suspend fun movie(key: String, tmdbId: String, name: String, year: String): TmMovie? = withContext(Dispatchers.IO) {

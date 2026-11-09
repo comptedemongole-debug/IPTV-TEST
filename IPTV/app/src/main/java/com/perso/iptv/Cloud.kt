@@ -15,6 +15,11 @@ object Cloud {
     private const val BLOB = "https://jsonblob.com/api/jsonBlob"
     private const val KV = "https://api.keyval.org"
 
+    /** Dernier problème réseau rencontré (affiché dans Réglages pour comprendre un échec). */
+    @Volatile var lastErr: String = ""
+
+    private val idRe = Regex("[A-Za-z0-9-]{6,}")
+
     class Resp(val code: Int, val body: String, val location: String?)
 
     private fun req(method: String, url: String, body: String? = null): Resp {
@@ -54,8 +59,7 @@ object Cloud {
                 } catch (e: Exception) {
                     t
                 }
-                val d = v.filter { it.isDigit() }
-                Pair(r.code, if (d.length >= 6 && d.length == v.length) d else null)
+                Pair(r.code, if (idRe.matches(v)) v else null)
             }
         } catch (e: Exception) {
             Pair(-1, null)
@@ -69,8 +73,10 @@ object Cloud {
     fun getBlob(id: String): Pair<Int, JSONObject?> {
         return try {
             val r = req("GET", "$BLOB/$id")
+            if (r.code != 200) lastErr = "jsonblob HTTP ${r.code}"
             if (r.code == 200) Pair(200, JSONObject(r.body)) else Pair(r.code, null)
         } catch (e: Exception) {
+            lastErr = "jsonblob : ${e.javaClass.simpleName} ${e.message ?: ""}".trim()
             Pair(-1, null)
         }
     }
@@ -78,9 +84,14 @@ object Cloud {
     fun createBlob(json: String): String? {
         return try {
             val r = req("POST", BLOB, json)
-            val id = (r.location ?: "").substringAfterLast('/').filter { it.isDigit() }
-            if (r.code in 200..299 && id.length >= 6) id else null
+            val id = (r.location ?: "").trim().substringAfterLast('/')
+            if (r.code in 200..299 && idRe.matches(id)) id
+            else {
+                lastErr = "jsonblob HTTP ${r.code}" + if (r.code in 200..299) " (identifiant illisible)" else ""
+                null
+            }
         } catch (e: Exception) {
+            lastErr = "jsonblob : ${e.javaClass.simpleName} ${e.message ?: ""}".trim()
             null
         }
     }

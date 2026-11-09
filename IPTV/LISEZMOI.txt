@@ -27,10 +27,16 @@ reglages de mise a jour (chaque jour / 3 jours / semaine / mois) pour le contenu
 
 
 === Version 3.4 ===
-- Recherche instantanée (index local, tolérance aux fautes, acteurs/réalisateurs via TMDB, sans doublons).
-- Versions multiples d'un film / série : bouton « Versions » dans la fiche (infos réellement détectées uniquement).
-- Lecteur anti-coupure : reconnexion progressive bornée, détection des blocages, bascule vers une source confirmée identique.
+- Recherche : comportement d'origine conservé (tous les résultats, toutes catégories, aucun filtrage ni doublon masqué).
+- Pastilles en bas à gauche des affiches : 720p / 1080p / 4K et Dolby Vision / HDR / HDR10+ (uniquement si écrit dans le titre).
+- Comparateur de versions supprimé.
+- Lecteur anti-coupure : reconnexion progressive bornée, détection des blocages, message clair si échec, reprise au retour du réseau.
 - Chromecast : décodeur audio logiciel (AC3/E-AC3/DTS…) en dernier recours, menu des pistes audio complet.
 - Performances : cache EPG / fiches, images allégées, loader d'images réglé, mode Performance étendu (tampon vidéo court).
+- Rafraîchissement de la playlist une fois par jour, au premier démarrage de la journée.
 - « Libérer la mémoire » ne ferme plus les autres applis (il libère uniquement les caches de Kinéo).
 - Message de démarrage retiré.
+- Lecteur : menu Prog > « Lecture » (vitesse 0,75× à 2×, passer l'intro +90 s, minuteur de sommeil 30/60/90 min) et « Sous-titres » (piste + taille).
+- Films / séries : touches ← / → = −10 s / +10 s quand les commandes sont cachées.
+- Chaînes TV : taper le numéro de la chaîne à la télécommande (OK pour valider tout de suite).
+- Accueil Films / Séries : rangée « Continuer à regarder » (reprises synchronisées entre appareils quand la synchro fonctionne).

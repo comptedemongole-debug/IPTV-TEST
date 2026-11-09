@@ -127,8 +127,6 @@ class PlayerActivity : ComponentActivity() {
     private var failed = false          // plus aucune source ne fonctionne
     private var offlineFail = false
     private var statusOn = false
-    private var alts: List<AltSource>? = null
-    private var altsJob: Job? = null
     private val triedUrls = HashSet<String>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var reconnectPending = false
@@ -139,6 +137,20 @@ class PlayerActivity : ComponentActivity() {
             handler.postDelayed(this, 1000)
         }
     }
+    // --- confort de lecture : vitesse, minuteur, taille des sous-titres, numéro de chaîne
+    private val speeds = floatArrayOf(0.75f, 1f, 1.25f, 1.5f, 2f)
+    private var speedIdx = 1
+    private var sleepEnd = 0L           // 0 = pas de minuteur (SystemClock.elapsedRealtime)
+    private val sleepTask = Runnable {
+        saveProgress()
+        toast("Minuteur de sommeil : lecture arrêtée")
+        finish()
+    }
+    private val subSizes = floatArrayOf(0.04f, 0.0533f, 0.07f, 0.09f)
+    private val subSizeNames = arrayOf("Petite", "Normale", "Grande", "Très grande")
+    private var subSizeIdx = 1
+    private val numBuf = StringBuilder()
+    private val numTask = Runnable { commitNumber() }
     private var titleX = ""
     private var imgX: String? = null
     private var kindX = "vod"
@@ -209,6 +221,10 @@ class PlayerActivity : ComponentActivity() {
             progBtn.background = progBg(hasFocus)
             if (hasFocus) view.showController()
         }
+        subSizeIdx = try {
+            getSharedPreferences("kineo_player", MODE_PRIVATE).getInt("sub_size", 1).coerceIn(0, subSizes.size - 1)
+        } catch (e: Exception) { 1 }
+        applySubSize()
         view.controllerShowTimeoutMs = 8000
         view.setControllerVisibilityListener(object : PlayerView.ControllerVisibilityListener {
             override fun onVisibilityChanged(visibility: Int) {
@@ -331,9 +347,6 @@ class PlayerActivity : ComponentActivity() {
     private fun resetReliability() {
         handler.removeCallbacks(reconnectTask)
         reconnectPending = false
-        altsJob?.cancel()
-        altsJob = null
-        alts = null
         attempts = 0
         bufSince = 0L
         readySince = 0L
@@ -408,13 +421,12 @@ class PlayerActivity : ComponentActivity() {
     }
 
     /**
-     * Reconnexion progressive (1 s, 2 s, 4 s, 8 s) sur la même adresse ; si ça ne suffit pas, passage à une AUTRE source
-     * confirmée identique ; sinon message clair. Le nombre d'essais est borné : jamais de boucle infinie.
+     * Reconnexion progressive (1 s, 2 s, 4 s, 8 s) sur la même adresse ; si ça ne suffit pas, message clair. Le nombre d'essais est borné : jamais de boucle infinie.
      * Une simple lenteur ne déclenche rien (voir tick()).
      */
     private fun recover(reason: String, sameUrlRetries: Int) {
         if (failed || exo == null) return
-        if (reconnectPending || altsJob?.isActive == true) return
+        if (reconnectPending) return
         attempts++
         if (attempts <= sameUrlRetries) {
             val wait = minOf(1000L shl (attempts - 1), 8000L)
@@ -422,7 +434,7 @@ class PlayerActivity : ComponentActivity() {
             reconnectPending = true
             handler.postDelayed(reconnectTask, wait)
         } else {
-            switchSourceOrGiveUp(reason)
+            giveUp(reason)
         }
     }
 
@@ -433,53 +445,6 @@ class PlayerActivity : ComponentActivity() {
         readySince = 0L
         val pos = if (live) 0L else p.currentPosition
         if (pos > 0L) p.setMediaItem(MediaItem.fromUri(curUrl), pos) else p.setMediaItem(MediaItem.fromUri(curUrl))
-        p.prepare()
-        p.playWhenReady = true
-    }
-
-    private suspend fun findAlternatives(): List<AltSource> {
-        val repo = Zap.repo ?: return emptyList()
-        val api = Zap.api ?: return emptyList()
-        return try {
-            when {
-                live -> Alternatives.live(repo, api, Zap.items.getOrNull(Zap.index), triedUrls)
-                episodeContext() -> Alternatives.episode(repo, api, Zap.eps.getOrNull(Zap.epIndex), triedUrls)
-                vodContext() -> Alternatives.vod(repo, api, Zap.vodQueue.getOrNull(Zap.vodIndex), triedUrls)
-                else -> emptyList()
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Throwable) {
-            emptyList()
-        }
-    }
-
-    private fun switchSourceOrGiveUp(reason: String) {
-        showStatus("$reason\nRecherche d'une autre source…")
-        altsJob?.cancel()
-        altsJob = scope.launch {
-            val list = alts ?: findAlternatives().also { alts = it }
-            val next = list.firstOrNull { it.url !in triedUrls }
-            if (next != null) {
-                triedUrls.add(next.url)
-                attempts = 0
-                applySource(next)
-            } else {
-                giveUp(reason)
-            }
-        }
-    }
-
-    private fun applySource(next: AltSource) {
-        val p = exo ?: return
-        curUrl = next.url
-        retried = false
-        bufSince = 0L
-        readySince = 0L
-        flashMsg("Autre source : ${next.label}")
-        if (p === Preview.player) Preview.url = next.url
-        val pos = if (live) 0L else p.currentPosition
-        if (pos > 0L) p.setMediaItem(MediaItem.fromUri(next.url), pos) else p.setMediaItem(MediaItem.fromUri(next.url))
         p.prepare()
         p.playWhenReady = true
     }
@@ -615,6 +580,12 @@ class PlayerActivity : ComponentActivity() {
         handler.postDelayed(hideTask, 4000)
     }
 
+    private fun fmtPos(ms: Long): String {
+        val s = ms / 1000
+        return if (s >= 3600) String.format("%d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
+        else String.format("%d:%02d", s / 60, s % 60)
+    }
+
     private fun saveProgress() {
         if (live) return
         val p = exo ?: return
@@ -715,9 +686,121 @@ class PlayerActivity : ComponentActivity() {
         return out
     }
 
+    private fun applySubSize() {
+        view.subtitleView?.setFractionalTextSize(subSizes[subSizeIdx])
+    }
+
+    private fun refreshMenu() {
+        menuEntries = buildMenu()
+    }
+
+    private fun speedLabel(f: Float): String = (if (f == f.toInt().toFloat()) f.toInt().toString() else f.toString().replace('.', ',')) + "×"
+
+    private fun sleepLabel(): String {
+        if (sleepEnd == 0L) return "désactivé"
+        val left = ((sleepEnd - SystemClock.elapsedRealtime()) / 60000L).toInt() + 1
+        return "arrêt dans $left min"
+    }
+
+    private fun setSleep(minutes: Int) {
+        handler.removeCallbacks(sleepTask)
+        if (minutes <= 0) {
+            sleepEnd = 0L
+        } else {
+            sleepEnd = SystemClock.elapsedRealtime() + minutes * 60000L
+            handler.postDelayed(sleepTask, minutes * 60000L)
+        }
+    }
+
+    /** Vitesse (films / séries), minuteur de sommeil, saut d'intro. */
+    private fun playbackEntries(): List<MenuEntry> {
+        val p = exo ?: return emptyList()
+        val out = ArrayList<MenuEntry>()
+        out.add(MenuEntry.Header("Lecture"))
+        if (!live) {
+            out.add(MenuEntry.Row("Vitesse : ${speedLabel(speeds[speedIdx])}", "OK pour changer (0,75× à 2×)", false) {
+                speedIdx = (speedIdx + 1) % speeds.size
+                p.setPlaybackSpeed(speeds[speedIdx])
+                refreshMenu()
+            })
+            out.add(MenuEntry.Row("Passer l'intro (+90 s)", "avance de 1 min 30", false) {
+                val dur = p.duration
+                var t = p.currentPosition + 90_000L
+                if (dur > 0) t = minOf(t, dur - 1000L)
+                p.seekTo(maxOf(0L, t))
+                closeMenu()
+            })
+        }
+        out.add(MenuEntry.Row("Minuteur de sommeil : ${sleepLabel()}", "OK pour changer (30 / 60 / 90 min)", false) {
+            val cur = if (sleepEnd == 0L) 0 else ((sleepEnd - SystemClock.elapsedRealtime()) / 60000L).toInt() + 1
+            setSleep(when { sleepEnd == 0L -> 30; cur <= 30 -> 60; cur <= 60 -> 90; else -> 0 })
+            refreshMenu()
+        })
+        return out
+    }
+
+    /** Pistes de sous-titres réellement présentes + taille d'affichage. */
+    private fun subtitleEntries(): List<MenuEntry> {
+        val p = exo ?: return emptyList()
+        val groups = p.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+        val out = ArrayList<MenuEntry>()
+        out.add(MenuEntry.Header("Sous-titres"))
+        if (groups.isEmpty()) {
+            out.add(MenuEntry.Row("Aucun sous-titre dans ce flux", "", false) { })
+            return out
+        }
+        out.add(MenuEntry.Row("Désactivés", "", groups.none { it.isSelected }) {
+            p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+            closeMenu()
+        })
+        var n = 0
+        groups.forEach { g ->
+            for (i in 0 until g.length) {
+                n++
+                val f = g.getTrackFormat(i)
+                val ok = g.isTrackSupported(i)
+                val label = langName(f.language).ifBlank { f.label ?: "Piste $n" }
+                out.add(MenuEntry.Row(label + (if (!ok) "  ✕" else ""), if (!ok) "non pris en charge" else (f.label ?: ""), g.isTrackSelected(i)) {
+                    if (ok) {
+                        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                            .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i))
+                            .build()
+                        closeMenu()
+                    }
+                })
+            }
+        }
+        out.add(MenuEntry.Row("Taille : ${subSizeNames[subSizeIdx]}", "OK pour changer", false) {
+            subSizeIdx = (subSizeIdx + 1) % subSizes.size
+            applySubSize()
+            try { getSharedPreferences("kineo_player", MODE_PRIVATE).edit().putInt("sub_size", subSizeIdx).apply() } catch (e: Exception) { /* ignoré */ }
+            refreshMenu()
+        })
+        return out
+    }
+
+    // ---- numéro de chaîne tapé à la télécommande
+    private fun digitOf(k: Int): Int = when (k) {
+        in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 -> k - KeyEvent.KEYCODE_0
+        in KeyEvent.KEYCODE_NUMPAD_0..KeyEvent.KEYCODE_NUMPAD_9 -> k - KeyEvent.KEYCODE_NUMPAD_0
+        else -> -1
+    }
+
+    private fun commitNumber() {
+        handler.removeCallbacks(numTask)
+        if (numBuf.isEmpty()) return
+        val n = numBuf.toString().toIntOrNull() ?: 0
+        numBuf.setLength(0)
+        if (n in 1..Zap.items.size) zapTo(n - 1) else flashMsg("Chaîne $n introuvable")
+    }
+
     private fun buildMenu(): List<MenuEntry> {
         val out = ArrayList<MenuEntry>()
+        out.addAll(playbackEntries())
         out.addAll(audioEntries())
+        out.addAll(subtitleEntries())
         if (live) {
             out.add(MenuEntry.Header("Chaînes"))
             Zap.items.forEachIndexed { i, ch ->
@@ -787,7 +870,34 @@ class PlayerActivity : ComponentActivity() {
                 if (menuOpen) closeMenu() else openMenu()
                 return true
             }
+            // Films / séries : ← −10 s, → +10 s quand les commandes sont cachées
+            if (!menuOpen && !live && !failed && !view.isControllerFullyVisible &&
+                (k == KeyEvent.KEYCODE_DPAD_LEFT || k == KeyEvent.KEYCODE_DPAD_RIGHT)
+            ) {
+                val p = exo
+                if (p != null) {
+                    val d = if (k == KeyEvent.KEYCODE_DPAD_LEFT) -10_000L else 10_000L
+                    val dur = p.duration
+                    var t = p.currentPosition + d
+                    if (dur > 0) t = minOf(t, dur - 1000L)
+                    p.seekTo(maxOf(0L, t))
+                    flashMsg((if (d < 0) "−10 s" else "+10 s") + "   " + fmtPos(maxOf(0L, t)))
+                    return true
+                }
+            }
             if (!menuOpen && live && Zap.items.isNotEmpty()) {
+                val d = digitOf(k)
+                if (d >= 0) {
+                    if (numBuf.length < 4) numBuf.append(d)
+                    flashMsg("Chaîne : $numBuf")
+                    handler.removeCallbacks(numTask)
+                    handler.postDelayed(numTask, 1800)
+                    return true
+                }
+                if (numBuf.isNotEmpty() && (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER)) {
+                    commitNumber()
+                    return true
+                }
                 when (k) {
                     KeyEvent.KEYCODE_CHANNEL_UP -> { zap(1); return true }
                     KeyEvent.KEYCODE_CHANNEL_DOWN -> { zap(-1); return true }

@@ -28,6 +28,17 @@ object Tmdb {
         }
     }
 
+    suspend fun findTv(key: String, name: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val q = URLEncoder.encode(name, "UTF-8")
+            val res = JSONObject(get("https://api.themoviedb.org/3/search/tv?api_key=$key&language=fr-FR&query=$q"))
+                .optJSONArray("results")
+            if (res != null && res.length() > 0) res.getJSONObject(0).optInt("id").toString() else null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     /** Fiches déjà chargées : rouvrir un film (ou passer d'une version à l'autre) ne refait pas la requête. */
     private val movieCache = object : LinkedHashMap<String, TmMovie>(32, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, TmMovie>?): Boolean = size > 60

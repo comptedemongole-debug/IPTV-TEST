@@ -703,9 +703,6 @@ fun HeroPanel(hero: HeroState, kind: String, focus: FocusRequester, onPlay: (Ite
     }
 }
 
-// Largeur des affiches dans les rangées (taille d'origine)
-private val BROWSE_W = 124.dp
-
 // Catégorie complète ouverte (type, titre, éléments) : retrouvée au retour d'une fiche détaillée
 private var lastCollection: Triple<String, String, List<Item>>? = null
 
@@ -716,7 +713,6 @@ fun Browse(
     onPlay: (Item) -> Unit, onInfo: (Item) -> Unit,
     onResume: (Resume) -> Unit, onOpen: (Item) -> Unit
 ) {
-    // « Voir toute la collection » : titre de la catégorie + tous ses éléments
     var full by remember(kind) {
         mutableStateOf<Pair<String, List<Item>>?>(lastCollection?.takeIf { it.first == kind }?.let { it.second to it.third })
     }
@@ -755,7 +751,10 @@ fun BrowseHome(
         LazyColumn(Modifier.fillMaxSize(), state = listState) {
             if (resumes.isNotEmpty()) {
                 item {
-                    ShelfTitle("Continuer à regarder")
+                    Text(
+                        "Continuer à regarder", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
+                        modifier = Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp)
+                    )
                     LazyRow(
                         contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -764,7 +763,7 @@ fun BrowseHome(
                             Poster(
                                 Item(id = r.url, name = r.title, img = r.img, cat = "", ext = ""),
                                 2f / 3f, false, onFocus = {},
-                                progress = if (r.dur > 0) r.pos.toFloat() / r.dur else 0f, w = BROWSE_W
+                                progress = if (r.dur > 0) r.pos.toFloat() / r.dur else 0f
                             ) { onResume(r) }
                         }
                     }
@@ -772,20 +771,26 @@ fun BrowseHome(
             }
             if (favs.isNotEmpty()) {
                 item {
-                    ShelfTitle("Ma liste")
+                    Text(
+                        "Ma liste", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
+                        modifier = Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp)
+                    )
                     LazyRow(
                         contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         items(favs) { it ->
-                            Poster(it, 2f / 3f, false, onFocus, w = BROWSE_W) { onOpen(it) }
+                            Poster(it, 2f / 3f, false, onFocus) { onOpen(it) }
                         }
                     }
                 }
             }
             if (top.isNotEmpty()) {
                 item {
-                    ShelfTitle("Top 10 des nouveautés")
+                    Text(
+                        "Top 10 des nouveautés", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
+                        modifier = Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp)
+                    )
                     LazyRow(
                         contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -793,7 +798,7 @@ fun BrowseHome(
                         itemsIndexed(top) { idx, it ->
                             Row(verticalAlignment = Alignment.Bottom) {
                                 Text("${idx + 1}", fontSize = 72.sp, fontWeight = FontWeight.Black, color = Color(0xFF55557A))
-                                Poster(it, 2f / 3f, false, onFocus, w = BROWSE_W) { onOpen(it) }
+                                Poster(it, 2f / 3f, false, onFocus) { onOpen(it) }
                             }
                         }
                     }
@@ -808,16 +813,19 @@ fun BrowseHome(
                         else -> shelf.items
                     }
                 }
-                ShelfTitle(shelf.title, whole.size)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        shelf.title, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
+                        modifier = Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp)
+                    )
+                    SeeAllChip(whole.size) { onSeeAll(shelf.title, whole) }
+                }
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    item {
-                        SeeAllCard(whole.size, BROWSE_W) { onSeeAll(shelf.title, whole) }
-                    }
                     items(shelf.items) { it ->
-                        Poster(it, 2f / 3f, false, onFocus, w = BROWSE_W) { onOpen(it) }
+                        Poster(it, 2f / 3f, false, onFocus) { onOpen(it) }
                     }
                 }
             }
@@ -825,37 +833,20 @@ fun BrowseHome(
     }
 }
 
-/** Titre de rangée (style d'origine) + nombre de titres. */
+/** Petit bouton à droite du nom de la catégorie : ouvre tous les titres. La mise en page des rangées ne change pas. */
 @Composable
-fun ShelfTitle(text: String, count: Int = -1) {
-    Row(Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(text, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        if (count > 0) Text("   $count titres", fontSize = 13.sp, color = MUTED)
-    }
-}
-
-/** Première tuile de chaque rangée : ouvre la catégorie complète (on scrolle à droite pour parcourir, OK pour tout voir). */
-@Composable
-fun SeeAllCard(total: Int, w: Dp, onClick: () -> Unit) {
+fun SeeAllChip(total: Int, onClick: () -> Unit) {
     var f by remember { mutableStateOf(false) }
-    Box(
-        Modifier.padding(3.dp).width(w - 6.dp).aspectRatio(2f / 3f)
+    Text(
+        "Voir toute la collection ›  $total", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+        color = if (f) BG else TXT,
+        modifier = Modifier.padding(start = 14.dp, top = 6.dp)
             .onFocusChanged { f = it.isFocused }
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (f) Color(0x66FFFFFF) else Color(0x22FFFFFF))
-            .border(3.dp, if (f) Color.White else Color(0x33FFFFFF), RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick),
-        Alignment.Center
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(10.dp)) {
-            Text("›", fontSize = 44.sp, fontWeight = FontWeight.Black, color = if (f) Color.White else ACCENT)
-            Text(
-                "Voir toute la collection", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                color = TXT, textAlign = TextAlign.Center
-            )
-            Text("$total titres", fontSize = 11.sp, color = MUTED, modifier = Modifier.padding(top = 4.dp))
-        }
-    }
+            .clip(CircleShape)
+            .background(if (f) Color.White else Color(0x33FFFFFF))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+    )
 }
 
 /** Tous les titres d'une catégorie, en grille. Retour = revient aux rangées. */
@@ -898,7 +889,7 @@ fun CollectionGrid(title: String, list: List<Item>, onOpen: (Item) -> Unit, onBa
 }
 
 @Composable
-fun Poster(item: Item, ratio: Float, fit: Boolean, onFocus: (Item) -> Unit, progress: Float = -1f, w: Dp = 124.dp, onClick: () -> Unit) {
+fun Poster(item: Item, ratio: Float, fit: Boolean, onFocus: (Item) -> Unit, progress: Float = -1f, onClick: () -> Unit) {
     var f by remember { mutableStateOf(false) }
     val perf = LocalPerf.current
     val sc = animateFloatAsState(if (f && !perf) 1.1f else 1f, tween(180), label = "scale")
@@ -909,7 +900,7 @@ fun Poster(item: Item, ratio: Float, fit: Boolean, onFocus: (Item) -> Unit, prog
             .allowRgb565(perf).build()
     }
     Box(
-        Modifier.width(w).graphicsLayer { scaleX = sc.value; scaleY = sc.value }
+        Modifier.width(124.dp).graphicsLayer { scaleX = sc.value; scaleY = sc.value }
             .onFocusChanged { f = it.isFocused; if (it.isFocused) onFocus(item) }
             .border(3.dp, if (f) Color.White else Color.Transparent, RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)

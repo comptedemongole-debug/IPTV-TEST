@@ -45,6 +45,6 @@ reglages de mise a jour (chaque jour / 3 jours / semaine / mois) pour le contenu
 - Onglet TV refait façon Free TV : catégories en pastilles en haut, liste de chaînes en cartes avec logo, programme en cours et barre de progression.
 - Nouvelle catégorie « Récemment regardées » (30 dernières chaînes, en premier dans la barre du haut).
 - Barre de recherche visible dans l'en-tête (chaînes, films, séries).
-- Films/Séries : 3 catégories visibles à la fois (bannière fine, affiches compactes) + tuile « Voir toute la collection » au début de chaque rangée (toute la catégorie en grille).
+- Films/Séries : affichage Netflix d origine (bannière fixe en haut : fond, synopsis, durée, acteurs ; affiches 124 dp), titres de catégories lisibles, tuile « Voir toute la collection » au début de chaque rangée (toute la catégorie en grille).
 - Recherche : les films et séries des catégories masquées (ou masqués un par un) n'apparaissent plus. Les chaînes TV restent toutes trouvables.
 - Synchro : un code court de 6 caractères PAR APPAREIL (Réglages > Synchronisation) ; on saisit le code d un appareil sur un autre pour les lier ; requêtes réseau plus « navigateur » (erreur jsonblob 403).

@@ -654,38 +654,65 @@ fun HeroBackdrop(hero: HeroState) {
 
 @Composable
 fun HeroPanel(hero: HeroState, kind: String, focus: FocusRequester, onPlay: (Item) -> Unit, onInfo: (Item) -> Unit) {
+    val perf = LocalPerf.current
     val item = hero.shown
     val info = hero.info
-    // Bannière fine (une seule ligne) : laisse la place de voir 3 catégories à la fois
-    Row(
-        Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 32.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(
-                item?.name ?: "", fontSize = 20.sp, fontWeight = FontWeight.Black,
-                color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis
-            )
-            val meta = listOfNotNull(
-                item?.rating?.takeIf { it.isNotBlank() && it != "0" && it != "0.0" }?.let { "★ $it" },
-                info?.year?.takeIf { it.isNotBlank() },
-                info?.duration?.takeIf { it.isNotBlank() },
-                info?.genre?.takeIf { it.isNotBlank() }
-            )
-            Text(meta.joinToString("  •  "), fontSize = 12.sp, color = MUTED, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    Column(Modifier.fillMaxWidth(0.6f).height(230.dp).padding(start = 32.dp, top = 6.dp)) {
+        AnimatedContent(
+            targetState = item?.id,
+            transitionSpec = {
+                if (perf) EnterTransition.None togetherWith ExitTransition.None
+                else fadeIn(tween(300)) togetherWith fadeOut(tween(150))
+            },
+            label = "hero"
+        ) { _ ->
+            Column {
+                Text(
+                    item?.name ?: "", fontSize = 34.sp, lineHeight = 38.sp, fontWeight = FontWeight.Black,
+                    color = Color.White, maxLines = 2, overflow = TextOverflow.Ellipsis
+                )
+                val meta = listOfNotNull(
+                    item?.rating?.takeIf { it.isNotBlank() && it != "0" && it != "0.0" }?.let { "★ $it" },
+                    info?.year?.takeIf { it.isNotBlank() },
+                    info?.duration?.takeIf { it.isNotBlank() },
+                    info?.genre?.takeIf { it.isNotBlank() }
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    item?.lang?.takeIf { it.isNotBlank() }?.let { l ->
+                        Text(
+                            l, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White,
+                            modifier = Modifier.background(langColor(l), RoundedCornerShape(50))
+                                .padding(horizontal = 9.dp, vertical = 2.dp)
+                        )
+                    }
+                    Text(meta.joinToString("  •  "), fontSize = 13.sp, color = MUTED, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Spacer(Modifier.height(6.dp))
+                val cast = info?.cast.orEmpty()
+                Text(
+                    info?.plot.orEmpty(), fontSize = 13.sp, lineHeight = 18.sp, color = MUTED,
+                    maxLines = if (cast.isBlank()) 3 else 2, overflow = TextOverflow.Ellipsis
+                )
+                if (cast.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text("Avec : $cast", fontSize = 12.sp, color = MUTED, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
         }
-        Spacer(Modifier.width(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Spacer(Modifier.weight(1f))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Box(Modifier.focusRequester(focus)) {
                 ActionButton(if (kind == "series") "▶ Épisodes" else "▶ Lecture", true) { item?.let(onPlay) }
             }
             ActionButton("Plus d'infos", false) { item?.let(onInfo) }
         }
+        Spacer(Modifier.height(8.dp))
     }
 }
 
-// Largeur des affiches dans les rangées : petite, pour voir 3 catégories à la fois
-private val BROWSE_W = 70.dp
+// Largeur des affiches dans les rangées (taille d'origine)
+private val BROWSE_W = 124.dp
 
 // Catégorie complète ouverte (type, titre, éléments) : retrouvée au retour d'une fiche détaillée
 private var lastCollection: Triple<String, String, List<Item>>? = null
@@ -738,7 +765,7 @@ fun BrowseHome(
                 item {
                     ShelfTitle("Continuer à regarder")
                     LazyRow(
-                        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 3.dp),
+                        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         items(resumes) { r ->
@@ -755,7 +782,7 @@ fun BrowseHome(
                 item {
                     ShelfTitle("Ma liste")
                     LazyRow(
-                        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 3.dp),
+                        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         items(favs) { it ->
@@ -768,12 +795,12 @@ fun BrowseHome(
                 item {
                     ShelfTitle("Top 10 des nouveautés")
                     LazyRow(
-                        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 3.dp),
+                        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         itemsIndexed(top) { idx, it ->
                             Row(verticalAlignment = Alignment.Bottom) {
-                                Text("${idx + 1}", fontSize = 50.sp, fontWeight = FontWeight.Black, color = Color(0xFF55557A))
+                                Text("${idx + 1}", fontSize = 72.sp, fontWeight = FontWeight.Black, color = Color(0xFF55557A))
                                 Poster(it, 2f / 3f, false, onFocus, w = BROWSE_W) { onOpen(it) }
                             }
                         }
@@ -791,7 +818,7 @@ fun BrowseHome(
                 }
                 ShelfTitle(shelf.title, whole.size)
                 LazyRow(
-                    contentPadding = PaddingValues(horizontal = 32.dp, vertical = 3.dp),
+                    contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     item {
@@ -809,14 +836,14 @@ fun BrowseHome(
 /** Titre de rangée bien lisible (fond sombre : reste visible même devant une grande image). */
 @Composable
 fun ShelfTitle(text: String, count: Int = -1) {
-    Row(Modifier.padding(start = 32.dp, top = 4.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.padding(start = 32.dp, top = 12.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(
-            text, fontSize = 18.sp, fontWeight = FontWeight.Black, color = Color.White,
+            text, fontSize = 21.sp, fontWeight = FontWeight.Black, color = Color.White,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.background(Color(0xAA000000), RoundedCornerShape(10.dp))
-                .padding(horizontal = 12.dp, vertical = 2.dp)
+                .padding(horizontal = 14.dp, vertical = 4.dp)
         )
-        if (count > 0) Text("   $count titres", fontSize = 13.sp, color = MUTED)
+        if (count > 0) Text("   $count titres", fontSize = 14.sp, color = MUTED)
     }
 }
 
@@ -833,13 +860,13 @@ fun SeeAllCard(total: Int, w: Dp, onClick: () -> Unit) {
             .clickable(onClick = onClick),
         Alignment.Center
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(4.dp)) {
-            Text("›", fontSize = 30.sp, fontWeight = FontWeight.Black, color = if (f) Color.White else ACCENT)
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(10.dp)) {
+            Text("›", fontSize = 44.sp, fontWeight = FontWeight.Black, color = if (f) Color.White else ACCENT)
             Text(
-                "Voir toute la collection", fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.SemiBold,
+                "Voir toute la collection", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
                 color = TXT, textAlign = TextAlign.Center
             )
-            Text("$total titres", fontSize = 9.sp, color = MUTED, modifier = Modifier.padding(top = 2.dp))
+            Text("$total titres", fontSize = 11.sp, color = MUTED, modifier = Modifier.padding(top = 4.dp))
         }
     }
 }

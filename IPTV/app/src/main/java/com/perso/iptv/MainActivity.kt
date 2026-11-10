@@ -13,6 +13,7 @@ import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -97,6 +98,9 @@ private val TXT = Color(0xFFF2F2F5)
 private val MUTED = Color(0xFFC9C9D2)
 private val ACCENT = Color(0xFFE5484D)
 private val PILL = Color(0xFF34343F)
+
+/** Largeur des affiches dans les rangées Films / Séries (plus étroit = plus de titres visibles). */
+private val ROW_W = 108.dp
 
 val LocalPerf = compositionLocalOf { false }
 
@@ -653,11 +657,13 @@ fun HeroBackdrop(hero: HeroState) {
 }
 
 @Composable
-fun HeroPanel(hero: HeroState, kind: String, focus: FocusRequester, onPlay: (Item) -> Unit, onInfo: (Item) -> Unit) {
+fun HeroPanel(hero: HeroState, kind: String, focus: FocusRequester, onPlay: (Item) -> Unit, onInfo: (Item) -> Unit, compact: Boolean = false) {
     val perf = LocalPerf.current
     val item = hero.shown
     val info = hero.info
-    Column(Modifier.fillMaxWidth(0.6f).height(230.dp).padding(start = 32.dp, top = 6.dp)) {
+    // Bannière complète en haut de page ; réduite (mêmes infos, sans boutons) quand on descend dans les rangées
+    val hh by animateDpAsState(if (compact) 100.dp else 210.dp, tween(if (perf) 0 else 220), label = "heroH")
+    Column(Modifier.fillMaxWidth(if (compact) 0.75f else 0.6f).height(hh).padding(start = 32.dp, top = 6.dp)) {
         AnimatedContent(
             targetState = item?.id,
             transitionSpec = {
@@ -668,8 +674,8 @@ fun HeroPanel(hero: HeroState, kind: String, focus: FocusRequester, onPlay: (Ite
         ) { _ ->
             Column {
                 Text(
-                    item?.name ?: "", fontSize = 34.sp, lineHeight = 38.sp, fontWeight = FontWeight.Black,
-                    color = Color.White, maxLines = 2, overflow = TextOverflow.Ellipsis
+                    item?.name ?: "", fontSize = if (compact) 24.sp else 34.sp, lineHeight = if (compact) 28.sp else 38.sp, fontWeight = FontWeight.Black,
+                    color = Color.White, maxLines = if (compact) 1 else 2, overflow = TextOverflow.Ellipsis
                 )
                 val meta = listOfNotNull(
                     item?.rating?.takeIf { it.isNotBlank() && it != "0" && it != "0.0" }?.let { "★ $it" },
@@ -677,7 +683,7 @@ fun HeroPanel(hero: HeroState, kind: String, focus: FocusRequester, onPlay: (Ite
                     info?.duration?.takeIf { it.isNotBlank() },
                     info?.genre?.takeIf { it.isNotBlank() }
                 )
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(if (compact) 3.dp else 8.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     item?.lang?.takeIf { it.isNotBlank() }?.let { l ->
                         Text(
@@ -688,10 +694,11 @@ fun HeroPanel(hero: HeroState, kind: String, focus: FocusRequester, onPlay: (Ite
                     }
                     Text(meta.joinToString("  •  "), fontSize = 13.sp, color = MUTED, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                Spacer(Modifier.height(6.dp))
-                Text(info?.plot.orEmpty(), fontSize = 13.sp, lineHeight = 18.sp, color = MUTED, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(if (compact) 3.dp else 6.dp))
+                Text(info?.plot.orEmpty(), fontSize = 13.sp, lineHeight = 18.sp, color = MUTED, maxLines = if (compact) 2 else 3, overflow = TextOverflow.Ellipsis)
             }
         }
+        if (!compact) {
         Spacer(Modifier.weight(1f))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Box(Modifier.focusRequester(focus)) {
@@ -700,6 +707,7 @@ fun HeroPanel(hero: HeroState, kind: String, focus: FocusRequester, onPlay: (Ite
             ActionButton("Plus d'infos", false) { item?.let(onInfo) }
         }
         Spacer(Modifier.height(8.dp))
+        }
     }
 }
 
@@ -743,94 +751,115 @@ fun BrowseHome(
     BackHandler(enabled = !atTop) {
         scope.launch {
             listState.scrollToItem(0)
+            delay(80) // laisse la bannière complète (avec ses boutons) se recomposer avant de lui redonner le focus
             try { heroFocus.requestFocus() } catch (e: Exception) { /* ignoré */ }
         }
     }
+    // Quand on arrive sur une rangée, la liste se cale pour montrer son TITRE (la TV ne scrolle sinon que juste ce qu'il faut pour l'affiche)
+    val baseRows = (if (resumes.isNotEmpty()) 1 else 0) + (if (favs.isNotEmpty()) 1 else 0) + (if (top.isNotEmpty()) 1 else 0)
     Column(Modifier.fillMaxSize()) {
-        HeroPanel(hero, kind, heroFocus, onPlay, onInfo)
+        HeroPanel(hero, kind, heroFocus, onPlay, onInfo, compact = !atTop)
         LazyColumn(Modifier.fillMaxSize(), state = listState) {
             if (resumes.isNotEmpty()) {
                 item {
-                    Text(
-                        "Continuer à regarder", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
-                        modifier = Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp)
-                    )
-                    LazyRow(
-                        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        items(resumes) { r ->
-                            Poster(
-                                Item(id = r.url, name = r.title, img = r.img, cat = "", ext = ""),
-                                2f / 3f, false, onFocus = {},
-                                progress = if (r.dur > 0) r.pos.toFloat() / r.dur else 0f
-                            ) { onResume(r) }
+                    val myIdx = 0
+                    ShelfBlock({ scope.launch { listState.animateScrollToItem(myIdx) } }) {
+                        Text(
+                            "Continuer à regarder", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
+                            modifier = Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp)
+                        )
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            items(resumes) { r ->
+                                Poster(
+                                    Item(id = r.url, name = r.title, img = r.img, cat = "", ext = ""),
+                                    2f / 3f, false, onFocus = {},
+                                    progress = if (r.dur > 0) r.pos.toFloat() / r.dur else 0f,
+                                    w = ROW_W
+                                ) { onResume(r) }
+                            }
                         }
                     }
                 }
             }
             if (favs.isNotEmpty()) {
                 item {
-                    Text(
-                        "Ma liste", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
-                        modifier = Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp)
-                    )
-                    LazyRow(
-                        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        items(favs) { it ->
-                            Poster(it, 2f / 3f, false, onFocus) { onOpen(it) }
+                    val myIdx = (if (resumes.isNotEmpty()) 1 else 0)
+                    ShelfBlock({ scope.launch { listState.animateScrollToItem(myIdx) } }) {
+                        Text(
+                            "Ma liste", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
+                            modifier = Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp)
+                        )
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            items(favs) { it ->
+                                Poster(it, 2f / 3f, false, onFocus, w = ROW_W) { onOpen(it) }
+                            }
                         }
                     }
                 }
             }
             if (top.isNotEmpty()) {
                 item {
-                    Text(
-                        "Top 10 des nouveautés", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
-                        modifier = Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp)
-                    )
-                    LazyRow(
-                        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        itemsIndexed(top) { idx, it ->
-                            Row(verticalAlignment = Alignment.Bottom) {
-                                Text("${idx + 1}", fontSize = 72.sp, fontWeight = FontWeight.Black, color = Color(0xFF55557A))
-                                Poster(it, 2f / 3f, false, onFocus) { onOpen(it) }
+                    val myIdx = (if (resumes.isNotEmpty()) 1 else 0) + (if (favs.isNotEmpty()) 1 else 0)
+                    ShelfBlock({ scope.launch { listState.animateScrollToItem(myIdx) } }) {
+                        Text(
+                            "Top 10 des nouveautés", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
+                            modifier = Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp)
+                        )
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            itemsIndexed(top) { idx, it ->
+                                Row(verticalAlignment = Alignment.Bottom) {
+                                    Text("${idx + 1}", fontSize = 72.sp, fontWeight = FontWeight.Black, color = Color(0xFF55557A))
+                                    Poster(it, 2f / 3f, false, onFocus, w = ROW_W) { onOpen(it) }
+                                }
                             }
                         }
                     }
                 }
             }
-            items(data.rows) { shelf ->
-                val whole = remember(data, shelf) {
-                    val c = data.cats.firstOrNull { it.name == shelf.title }
-                    when {
-                        c != null -> data.byCat[c.id] ?: shelf.items
-                        shelf.title == "Récemment ajoutés" -> data.all.sortedByDescending { it.added }.take(500)
-                        else -> shelf.items
+            itemsIndexed(data.rows) { ri, shelf ->
+                ShelfBlock({ scope.launch { listState.animateScrollToItem(baseRows + ri) } }) {
+                    val whole = remember(data, shelf) {
+                        val c = data.cats.firstOrNull { it.name == shelf.title }
+                        when {
+                            c != null -> data.byCat[c.id] ?: shelf.items
+                            shelf.title == "Récemment ajoutés" -> data.all.sortedByDescending { it.added }.take(500)
+                            else -> shelf.items
+                        }
                     }
-                }
-                Text(
-                    shelf.title, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
-                    modifier = Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp)
-                )
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    item {
-                        SeeAllCard(whole.size, 124.dp) { onSeeAll(shelf.title, whole) }
-                    }
-                    items(shelf.items) { it ->
-                        Poster(it, 2f / 3f, false, onFocus) { onOpen(it) }
+                    Text(
+                        shelf.title, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
+                        modifier = Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp)
+                    )
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        item {
+                            SeeAllCard(whole.size, ROW_W) { onSeeAll(shelf.title, whole) }
+                        }
+                        items(shelf.items) { it ->
+                            Poster(it, 2f / 3f, false, onFocus, w = ROW_W) { onOpen(it) }
+                        }
                     }
                 }
             }
         }
     }
+}
+
+/** Une rangée (titre + affiches) : prévient quand le focus y arrive, pour qu'on puisse montrer son titre. */
+@Composable
+fun ShelfBlock(onFocused: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+    Column(Modifier.onFocusChanged { if (it.hasFocus) onFocused() }, content = content)
 }
 
 /** Première tuile de chaque rangée : ouvre la catégorie complète (on scrolle à droite pour parcourir, OK pour tout voir). */
@@ -897,7 +926,7 @@ fun CollectionGrid(title: String, list: List<Item>, onOpen: (Item) -> Unit, onBa
 }
 
 @Composable
-fun Poster(item: Item, ratio: Float, fit: Boolean, onFocus: (Item) -> Unit, progress: Float = -1f, onClick: () -> Unit) {
+fun Poster(item: Item, ratio: Float, fit: Boolean, onFocus: (Item) -> Unit, progress: Float = -1f, w: Dp = 124.dp, onClick: () -> Unit) {
     var f by remember { mutableStateOf(false) }
     val perf = LocalPerf.current
     val sc = animateFloatAsState(if (f && !perf) 1.1f else 1f, tween(180), label = "scale")
@@ -908,7 +937,7 @@ fun Poster(item: Item, ratio: Float, fit: Boolean, onFocus: (Item) -> Unit, prog
             .allowRgb565(perf).build()
     }
     Box(
-        Modifier.width(124.dp).graphicsLayer { scaleX = sc.value; scaleY = sc.value }
+        Modifier.width(w).graphicsLayer { scaleX = sc.value; scaleY = sc.value }
             .onFocusChanged { f = it.isFocused; if (it.isFocused) onFocus(item) }
             .border(3.dp, if (f) Color.White else Color.Transparent, RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)

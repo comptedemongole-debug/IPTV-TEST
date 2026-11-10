@@ -813,17 +813,17 @@ fun BrowseHome(
                         else -> shelf.items
                     }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        shelf.title, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
-                        modifier = Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp)
-                    )
-                    SeeAllChip(whole.size) { onSeeAll(shelf.title, whole) }
-                }
+                Text(
+                    shelf.title, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
+                    modifier = Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp)
+                )
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    item {
+                        SeeAllCard(whole.size, 124.dp) { onSeeAll(shelf.title, whole) }
+                    }
                     items(shelf.items) { it ->
                         Poster(it, 2f / 3f, false, onFocus) { onOpen(it) }
                     }
@@ -833,20 +833,28 @@ fun BrowseHome(
     }
 }
 
-/** Petit bouton à droite du nom de la catégorie : ouvre tous les titres. La mise en page des rangées ne change pas. */
+/** Première tuile de chaque rangée : ouvre la catégorie complète (on scrolle à droite pour parcourir, OK pour tout voir). */
 @Composable
-fun SeeAllChip(total: Int, onClick: () -> Unit) {
+fun SeeAllCard(total: Int, w: Dp, onClick: () -> Unit) {
     var f by remember { mutableStateOf(false) }
-    Text(
-        "Voir toute la collection ›  $total", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
-        color = if (f) BG else TXT,
-        modifier = Modifier.padding(start = 14.dp, top = 6.dp)
+    Box(
+        Modifier.padding(3.dp).width(w - 6.dp).aspectRatio(2f / 3f)
             .onFocusChanged { f = it.isFocused }
-            .clip(CircleShape)
-            .background(if (f) Color.White else Color(0x33FFFFFF))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 4.dp)
-    )
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (f) Color(0x66FFFFFF) else Color(0x22FFFFFF))
+            .border(3.dp, if (f) Color.White else Color(0x33FFFFFF), RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick),
+        Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(10.dp)) {
+            Text("›", fontSize = 44.sp, fontWeight = FontWeight.Black, color = if (f) Color.White else ACCENT)
+            Text(
+                "Voir toute la collection", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                color = TXT, textAlign = TextAlign.Center
+            )
+            Text("$total titres", fontSize = 11.sp, color = MUTED, modifier = Modifier.padding(top = 4.dp))
+        }
+    }
 }
 
 /** Tous les titres d'une catégorie, en grille. Retour = revient aux rangées. */

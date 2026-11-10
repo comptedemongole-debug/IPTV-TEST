@@ -689,15 +689,7 @@ fun HeroPanel(hero: HeroState, kind: String, focus: FocusRequester, onPlay: (Ite
                     Text(meta.joinToString("  •  "), fontSize = 13.sp, color = MUTED, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 Spacer(Modifier.height(6.dp))
-                val cast = info?.cast.orEmpty()
-                Text(
-                    info?.plot.orEmpty(), fontSize = 13.sp, lineHeight = 18.sp, color = MUTED,
-                    maxLines = if (cast.isBlank()) 3 else 2, overflow = TextOverflow.Ellipsis
-                )
-                if (cast.isNotBlank()) {
-                    Spacer(Modifier.height(4.dp))
-                    Text("Avec : $cast", fontSize = 12.sp, color = MUTED, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
+                Text(info?.plot.orEmpty(), fontSize = 13.sp, lineHeight = 18.sp, color = MUTED, maxLines = 3, overflow = TextOverflow.Ellipsis)
             }
         }
         Spacer(Modifier.weight(1f))
@@ -833,17 +825,12 @@ fun BrowseHome(
     }
 }
 
-/** Titre de rangée bien lisible (fond sombre : reste visible même devant une grande image). */
+/** Titre de rangée (style d'origine) + nombre de titres. */
 @Composable
 fun ShelfTitle(text: String, count: Int = -1) {
-    Row(Modifier.padding(start = 32.dp, top = 12.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            text, fontSize = 21.sp, fontWeight = FontWeight.Black, color = Color.White,
-            maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.background(Color(0xAA000000), RoundedCornerShape(10.dp))
-                .padding(horizontal = 14.dp, vertical = 4.dp)
-        )
-        if (count > 0) Text("   $count titres", fontSize = 14.sp, color = MUTED)
+    Row(Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(text, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (count > 0) Text("   $count titres", fontSize = 13.sp, color = MUTED)
     }
 }
 

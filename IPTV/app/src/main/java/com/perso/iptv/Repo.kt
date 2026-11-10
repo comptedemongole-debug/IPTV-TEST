@@ -868,16 +868,11 @@ class Repo(private val ctx: Context, val api: Xtream) {
         if (b) scheduleCloud()
     }
 
-    /** Code court (6 caractères) à saisir sur un autre appareil. */
+    /** Code court (6 caractères) PROPRE À CET APPAREIL : à saisir sur un autre appareil pour le lier à celui-ci. */
     var cloudShort by mutableStateOf(prefs.getString("cloud_short", "") ?: "")
         private set
 
     private fun saveCloudId(id: String) {
-        if (id != cloudId) {
-            // autre espace : l'ancien code court ne correspond plus
-            cloudShort = ""
-            prefs.edit().remove("cloud_short").apply()
-        }
         cloudId = id
         prefs.edit().putString("cloud_id", id).apply()
     }
@@ -887,9 +882,20 @@ class Repo(private val ctx: Context, val api: Xtream) {
         prefs.edit().putString("cloud_short", code).apply()
     }
 
-    /** Crée (une seule fois) le code court de cet espace et l'enregistre pour que les autres appareils le retrouvent. */
+    /**
+     * Crée (une seule fois) le code de CET appareil et l'associe à l'espace partagé actuel,
+     * pour qu'un autre appareil qui saisit ce code rejoigne le même espace.
+     */
     private suspend fun ensureShortCode(id: String) {
-        if (cloudShort.isNotBlank() || id.isBlank()) return
+        if (id.isBlank()) return
+        if (cloudShort.isNotBlank()) {
+            // code déjà créé : on le ré-associe seulement si l'espace a changé
+            if (prefs.getString("cloud_short_reg", "") != id) {
+                val ok = withContext(Dispatchers.IO) { Cloud.setPointer("kineo-code-" + cloudShort.lowercase(), id) }
+                if (ok) prefs.edit().putString("cloud_short_reg", id).apply()
+            }
+            return
+        }
         val alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
         val rnd = java.security.SecureRandom()
         repeat(5) {
@@ -899,7 +905,10 @@ class Repo(private val ctx: Context, val api: Xtream) {
             if (code < 0) return
             if (found == null) {
                 val ok = withContext(Dispatchers.IO) { Cloud.setPointer(key, id) }
-                if (ok) saveShort(c)
+                if (ok) {
+                    saveShort(c)
+                    prefs.edit().putString("cloud_short_reg", id).apply()
+                }
                 return
             }
         }
@@ -1138,7 +1147,6 @@ class Repo(private val ctx: Context, val api: Xtream) {
             return
         }
         var id = raw
-        var short = ""
         if (raw.length <= 10) {
             // code court : on retrouve l'espace correspondant
             cloudMsg = "Recherche du code…"
@@ -1149,10 +1157,8 @@ class Repo(private val ctx: Context, val api: Xtream) {
                 return
             }
             id = found
-            short = raw.uppercase()
         }
         saveCloudId(id)
-        if (short.isNotBlank()) saveShort(short)
         withContext(Dispatchers.IO) { Cloud.setPointer(Cloud.pointerKey(api.key), id) }
         syncCloud()
     }

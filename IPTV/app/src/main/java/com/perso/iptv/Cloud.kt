@@ -18,6 +18,9 @@ object Cloud {
     /** Dernier problème réseau rencontré (affiché dans Réglages pour comprendre un échec). */
     @Volatile var lastErr: String = ""
 
+    private const val UA =
+        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+
     private val idRe = Regex("[A-Za-z0-9-]{6,}")
 
     class Resp(val code: Int, val body: String, val location: String?)
@@ -28,7 +31,9 @@ object Cloud {
         c.connectTimeout = 10000
         c.readTimeout = 20000
         c.setRequestProperty("Accept", "application/json")
-        c.setRequestProperty("User-Agent", "Mozilla/5.0")
+        // Un « vrai » navigateur : un User-Agent trop nu (Mozilla/5.0) se fait refuser (403) par certains services
+        c.setRequestProperty("User-Agent", UA)
+        c.setRequestProperty("Accept-Language", "fr-FR,fr;q=0.9,en;q=0.8")
         if (body != null) {
             c.doOutput = true
             c.setRequestProperty("Content-Type", "application/json")
@@ -51,6 +56,7 @@ object Cloud {
         return try {
             val r = req("GET", "$KV/get/$key")
             if (r.code !in 200..299) {
+                if (r.code != 404) lastErr = "keyval HTTP ${r.code}"
                 Pair(r.code, null)
             } else {
                 val t = r.body.trim()
@@ -62,12 +68,19 @@ object Cloud {
                 Pair(r.code, if (idRe.matches(v)) v else null)
             }
         } catch (e: Exception) {
+            lastErr = "keyval : ${e.javaClass.simpleName} ${e.message ?: ""}".trim()
             Pair(-1, null)
         }
     }
 
-    fun setPointer(key: String, id: String) {
-        try { req("GET", "$KV/set/$key/$id") } catch (e: Exception) { /* ignoré */ }
+    fun setPointer(key: String, id: String): Boolean {
+        return try {
+            val r = req("GET", "$KV/set/$key/$id")
+            if (r.code in 200..299) true else { lastErr = "keyval HTTP ${r.code}"; false }
+        } catch (e: Exception) {
+            lastErr = "keyval : ${e.javaClass.simpleName} ${e.message ?: ""}".trim()
+            false
+        }
     }
 
     fun getBlob(id: String): Pair<Int, JSONObject?> {

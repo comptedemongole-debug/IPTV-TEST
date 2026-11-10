@@ -424,6 +424,7 @@ fun Home(api: Xtream, logout: () -> Unit) {
             "series", "vod" -> detail = k to item
             else -> {
                 Zap.items = sib; Zap.index = idx; Zap.api = api; Zap.repo = repo
+                repo.addRecent(item)
                 val handoff = Preview.player != null && Preview.item?.id == item.id
                 play(ctx, api.liveUrl(item.id), item.name, true, item.img, "live", 0L, if (handoff) item.id else null)
             }
@@ -702,12 +703,36 @@ fun HeroPanel(hero: HeroState, kind: String, focus: FocusRequester, onPlay: (Ite
     }
 }
 
+// Catégorie complète ouverte (type, titre, éléments) : retrouvée au retour d'une fiche détaillée
+private var lastCollection: Triple<String, String, List<Item>>? = null
+
 @Composable
 fun Browse(
     data: Data, kind: String, hero: HeroState,
     favs: List<Item>, resumes: List<Resume>,
     onPlay: (Item) -> Unit, onInfo: (Item) -> Unit,
     onResume: (Resume) -> Unit, onOpen: (Item) -> Unit
+) {
+    // « Voir toute la collection » : titre de la catégorie + tous ses éléments
+    var full by remember(kind) {
+        mutableStateOf<Pair<String, List<Item>>?>(lastCollection?.takeIf { it.first == kind }?.let { it.second to it.third })
+    }
+    val f = full
+    if (f != null) {
+        BackHandler { full = null; lastCollection = null }
+        CollectionGrid(f.first, f.second, onOpen) { full = null; lastCollection = null }
+    } else {
+        BrowseHome(data, kind, hero, favs, resumes, onPlay, onInfo, onResume, onOpen) { t, l -> full = t to l; lastCollection = Triple(kind, t, l) }
+    }
+}
+
+@Composable
+fun BrowseHome(
+    data: Data, kind: String, hero: HeroState,
+    favs: List<Item>, resumes: List<Resume>,
+    onPlay: (Item) -> Unit, onInfo: (Item) -> Unit,
+    onResume: (Resume) -> Unit, onOpen: (Item) -> Unit,
+    onSeeAll: (String, List<Item>) -> Unit
 ) {
     val top = remember(data) { data.rows.firstOrNull()?.items?.take(10) ?: emptyList() }
     val onFocus: (Item) -> Unit = remember(hero) { { i: Item -> hero.item = i } }
@@ -781,6 +806,14 @@ fun Browse(
                 }
             }
             items(data.rows) { shelf ->
+                val whole = remember(data, shelf) {
+                    val c = data.cats.firstOrNull { it.name == shelf.title }
+                    when {
+                        c != null -> data.byCat[c.id] ?: shelf.items
+                        shelf.title == "Récemment ajoutés" -> data.all.sortedByDescending { it.added }.take(500)
+                        else -> shelf.items
+                    }
+                }
                 Text(
                     shelf.title, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TXT,
                     modifier = Modifier.padding(start = 32.dp, top = 8.dp, bottom = 6.dp)
@@ -792,7 +825,73 @@ fun Browse(
                     items(shelf.items) { it ->
                         Poster(it, 2f / 3f, false, onFocus) { onOpen(it) }
                     }
+                    item {
+                        SeeAllCard(whole.size) { onSeeAll(shelf.title, whole) }
+                    }
                 }
+            }
+        }
+    }
+}
+
+/** Dernière tuile de chaque rangée : ouvre la catégorie complète. */
+@Composable
+fun SeeAllCard(total: Int, onClick: () -> Unit) {
+    var f by remember { mutableStateOf(false) }
+    Box(
+        Modifier.padding(3.dp).width(118.dp).aspectRatio(2f / 3f)
+            .onFocusChanged { f = it.isFocused }
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (f) Color(0x66FFFFFF) else Color(0x22FFFFFF))
+            .border(3.dp, if (f) Color.White else Color(0x33FFFFFF), RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick),
+        Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(10.dp)) {
+            Text("›", fontSize = 44.sp, fontWeight = FontWeight.Black, color = if (f) Color.White else ACCENT)
+            Text(
+                "Voir toute la collection", fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                color = TXT, textAlign = TextAlign.Center
+            )
+            Text("$total titres", fontSize = 11.sp, color = MUTED, modifier = Modifier.padding(top = 4.dp))
+        }
+    }
+}
+
+/** Tous les titres d'une catégorie, en grille. Retour = revient aux rangées. */
+@Composable
+fun CollectionGrid(title: String, list: List<Item>, onOpen: (Item) -> Unit, onBack: () -> Unit) {
+    val first = remember { FocusRequester() }
+    var bf by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { try { first.requestFocus() } catch (e: Exception) { /* ignoré */ } }
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "‹ Retour", color = TXT, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.focusRequester(first).onFocusChanged { bf = it.isFocused }
+                    .clip(CircleShape)
+                    .clickable(onClick = onBack)
+                    .background(if (bf) Color(0x66FFFFFF) else Color(0x33FFFFFF))
+                    .border(2.dp, if (bf) Color.White else Color.Transparent, CircleShape)
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+            Spacer(Modifier.width(16.dp))
+            Text(title, color = TXT, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.width(12.dp))
+            Text("${list.size} titres", color = MUTED, fontSize = 14.sp)
+        }
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(128.dp),
+            contentPadding = PaddingValues(horizontal = 32.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            itemsIndexed(list) { _, it ->
+                Poster(it, 2f / 3f, false, {}) { onOpen(it) }
             }
         }
     }
@@ -1077,11 +1176,26 @@ fun EpisodeRow(
 fun LiveView(repo: Repo, data: Data, onHide: (Item) -> Unit, onHideCat: (Cat) -> Unit, onPlay: (Item, List<Item>, Int) -> Unit) {
     val ev = repo.epgVersion
     val appCtx = LocalContext.current.applicationContext
-    var catId by remember { mutableStateOf(data.cats.firstOrNull()?.id) }
+    var catId by remember {
+        mutableStateOf<String?>(if (repo.recents.isNotEmpty()) "__recent" else data.cats.firstOrNull()?.id)
+    }
     var focusedCh by remember { mutableStateOf<Item?>(null) }
     val favList = repo.favItems("live")
-    val cats = if (favList.isNotEmpty()) listOf(Cat("__fav", "★ Favoris")) + data.cats else data.cats
-    val list = if (catId == "__fav") favList else (data.byCat[catId] ?: emptyList())
+    // une chaîne masquée ou disparue de la playlist ne doit plus apparaître dans « Récemment regardées »
+    val known = remember(data) { data.all.mapTo(HashSet()) { it.id } }
+    val recentList = repo.recents.filter { it.id in known }
+    val cats = buildList {
+        if (recentList.isNotEmpty()) add(Cat("__recent", "Récemment regardées"))
+        if (favList.isNotEmpty()) add(Cat("__fav", "★ Favoris"))
+        addAll(data.cats)
+    }
+    val effId = if (cats.any { it.id == catId }) catId else cats.firstOrNull()?.id
+    val list = when (effId) {
+        "__recent" -> recentList
+        "__fav" -> favList
+        else -> data.byCat[effId] ?: emptyList()
+    }
+    val listName = cats.firstOrNull { it.id == effId }?.name ?: ""
     val pItem = Preview.item
     // on quitte l'onglet TV : on coupe l'aperçu (sauf s'il est en plein écran)
     DisposableEffect(Unit) { onDispose { if (!Preview.lent) Preview.release() } }
@@ -1091,37 +1205,76 @@ fun LiveView(repo: Repo, data: Data, onHide: (Item) -> Unit, onHideCat: (Cat) ->
             if (i >= 0) onPlay(pItem, list, i) else onPlay(pItem, listOf(pItem), 0)
         }
     }
-    Row(Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
-        LazyColumn(Modifier.width(200.dp).fillMaxHeight()) {
-            items(cats) { c -> FocusRow(c.name, c.id == catId, onFocus = { catId = c.id }) { catId = c.id } }
-        }
-        Spacer(Modifier.width(12.dp))
-        LazyColumn(Modifier.weight(1f).fillMaxHeight()) {
-            itemsIndexed(list) { idx, ch ->
-                ChannelRow(repo, ch, idx + 1, ev, onFocus = { focusedCh = ch }) {
-                    // 1er clic : aperçu dans le carré. 2e clic sur la même chaîne : plein écran.
-                    if (!repo.preview || pItem?.id == ch.id) onPlay(ch, list, idx)
-                    else Preview.play(appCtx, repo.api.liveUrl(ch.id), ch)
-                }
-            }
-        }
-        Spacer(Modifier.width(12.dp))
-        val cur = focusedCh ?: list.firstOrNull()
-        val curCat = data.cats.firstOrNull { it.id == catId }
-        ChannelPanel(
-            repo, cur, curCat?.name, ev, Modifier.width(300.dp), pItem, openFull,
-            onHideCat = {
-                curCat?.let { c ->
-                    catId = data.cats.firstOrNull { it.id != c.id }?.id
-                    focusedCh = null
-                    onHideCat(c)
-                }
-            }
+    Column(Modifier.fillMaxSize()) {
+        // catégories en haut, façon Free TV
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 32.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.fillMaxWidth()
         ) {
-            cur?.let { onHide(it) }
-            focusedCh = null
+            items(cats) { c ->
+                CatChip(c.name, c.id == effId, onFocus = { catId = c.id }) { catId = c.id }
+            }
+        }
+        Row(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 32.dp)) {
+            Column(Modifier.weight(1f).fillMaxHeight()) {
+                Text(
+                    "$listName  ·  ${list.size} chaîne${if (list.size > 1) "s" else ""}",
+                    color = MUTED, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(start = 8.dp, top = 4.dp, bottom = 6.dp)
+                )
+                LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+                    if (list.isEmpty()) {
+                        item {
+                            Text(
+                                if (effId == "__recent") "Aucune chaîne regardée pour l'instant." else "Aucune chaîne.",
+                                color = MUTED, modifier = Modifier.padding(16.dp)
+                            )
+                        }
+                    }
+                    itemsIndexed(list) { idx, ch ->
+                        ChannelRow(repo, ch, idx + 1, ev, onFocus = { focusedCh = ch }) {
+                            // 1er clic : aperçu dans le carré. 2e clic sur la même chaîne : plein écran.
+                            if (!repo.preview || pItem?.id == ch.id) onPlay(ch, list, idx)
+                            else Preview.play(appCtx, repo.api.liveUrl(ch.id), ch)
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.width(16.dp))
+            val cur = focusedCh ?: list.firstOrNull()
+            val curCat = data.cats.firstOrNull { it.id == effId }
+            ChannelPanel(
+                repo, cur, curCat?.name, ev, Modifier.width(320.dp), pItem, openFull,
+                onHideCat = {
+                    curCat?.let { c ->
+                        catId = cats.firstOrNull { it.id != c.id && !it.id.startsWith("__") }?.id
+                        focusedCh = null
+                        onHideCat(c)
+                    }
+                }
+            ) {
+                cur?.let { onHide(it) }
+                focusedCh = null
+            }
         }
     }
+}
+
+/** Pastille de catégorie (barre du haut de l'onglet TV). */
+@Composable
+fun CatChip(text: String, selected: Boolean, onFocus: () -> Unit, onClick: () -> Unit) {
+    var f by remember { mutableStateOf(false) }
+    Text(
+        text, maxLines = 1, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+        color = if (f) BG else TXT,
+        modifier = Modifier
+            .onFocusChanged { f = it.isFocused; if (it.isFocused) onFocus() }
+            .clip(CircleShape)
+            .background(if (f) Color.White else if (selected) ACCENT else Color(0x33FFFFFF))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 9.dp)
+    )
 }
 
 @Composable
@@ -1143,22 +1296,31 @@ fun ChannelRow(repo: Repo, ch: Item, num: Int, ev: Int, onFocus: () -> Unit, onC
     val p = progs.firstOrNull()
     val frac = if (p != null && p.stop > p.start) ((nowS - p.start).toFloat() / (p.stop - p.start)).coerceIn(0f, 1f) else 0f
     Row(
-        Modifier.fillMaxWidth()
+        Modifier.fillMaxWidth().padding(vertical = 3.dp)
             .onFocusChanged { f = it.isFocused; if (it.isFocused) onFocus() }
-            .background(if (f) Color(0x33FFFFFF) else Color.Transparent, RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick).padding(8.dp),
+            .background(if (f) Color(0x44FFFFFF) else Color(0x14FFFFFF), RoundedCornerShape(12.dp))
+            .border(2.dp, if (f) Color.White else Color.Transparent, RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text("$num", color = MUTED, fontSize = 13.sp, modifier = Modifier.width(36.dp))
+        Text("$num", color = MUTED, fontSize = 13.sp, modifier = Modifier.width(34.dp))
         val lctx = LocalContext.current
-        val logo = remember(ch.img) { ImageRequest.Builder(lctx).data(ch.img).size(96, 96).build() }
-        AsyncImage(model = logo, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.size(40.dp))
-        Spacer(Modifier.width(10.dp))
+        val logo = remember(ch.img) { ImageRequest.Builder(lctx).data(ch.img).size(112, 112).build() }
+        Box(
+            Modifier.size(52.dp).background(Color(0x22FFFFFF), RoundedCornerShape(10.dp)).padding(6.dp),
+            Alignment.Center
+        ) {
+            AsyncImage(model = logo, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+        }
+        Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(ch.name, color = TXT, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(ch.name, color = TXT, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(p?.title ?: "Programme indisponible", color = MUTED, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (p != null) {
-                LinearProgressIndicator(progress = { frac }, modifier = Modifier.padding(top = 4.dp).fillMaxWidth().height(3.dp))
+                LinearProgressIndicator(
+                    progress = { frac }, color = ACCENT, trackColor = Color(0x33FFFFFF),
+                    modifier = Modifier.padding(top = 5.dp).fillMaxWidth().height(3.dp)
+                )
             }
         }
     }
@@ -1266,19 +1428,22 @@ fun PreviewBox(item: Item?, onClick: () -> Unit, modifier: Modifier) {
 @Composable
 fun SearchPill(selected: Boolean, onClick: () -> Unit) {
     var f by remember { mutableStateOf(false) }
-    Box(
+    Row(
         Modifier.onFocusChanged { f = it.isFocused }
             .clip(CircleShape)
             .background(if (selected) PILL else Color(0x33FFFFFF))
             .border(2.dp, if (f) Color.White else Color.Transparent, CircleShape)
             .clickable(onClick = onClick)
-            .padding(10.dp)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Canvas(Modifier.size(20.dp)) {
+        Canvas(Modifier.size(18.dp)) {
             val w = size.width
             drawCircle(Color.White, radius = w * 0.32f, center = Offset(w * 0.42f, w * 0.42f), style = Stroke(width = w * 0.1f))
             drawLine(Color.White, Offset(w * 0.65f, w * 0.65f), Offset(w * 0.92f, w * 0.92f), strokeWidth = w * 0.12f, cap = StrokeCap.Round)
         }
+        Spacer(Modifier.width(8.dp))
+        Text("Chaînes, films, séries…", color = MUTED, fontSize = 13.sp, maxLines = 1)
     }
 }
 
@@ -1669,16 +1834,17 @@ fun SettingsScreen(repo: Repo, scope: CoroutineScope, logout: () -> Unit) {
             else "Pas encore synchronisé",
             fontSize = 13.sp, color = ACCENT
         )
-        if (repo.cloudId.isNotBlank()) {
-            Text(
-                "Code de cet espace : ${repo.cloudId}  (si l'autre appareil ne retrouve pas tout seul, saisis ce code dessous)",
-                fontSize = 12.sp, color = MUTED
-            )
+        if (repo.cloudShort.isNotBlank()) {
+            Text("Code de synchro de cet espace", fontSize = 12.sp, color = MUTED)
+            Text(repo.cloudShort, fontSize = 34.sp, fontWeight = FontWeight.Black, color = TXT, letterSpacing = 6.sp)
+            Text("Sur l'autre appareil : Réglages > Synchronisation, saisis ce code puis « Utiliser ce code ».", fontSize = 12.sp, color = MUTED)
+        } else if (repo.cloudId.isNotBlank()) {
+            Text("Espace créé. Le code court s'affichera après la prochaine synchronisation réussie.", fontSize = 12.sp, color = MUTED)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
                 codeIn, { codeIn = it }, singleLine = true,
-                placeholder = { Text("Code d'un autre appareil") },
+                placeholder = { Text("Code de l'autre appareil (6 caractères)") },
                 modifier = Modifier.width(300.dp)
             )
             ActionButton("Utiliser ce code", false) { scope.launch { repo.useCloudCode(codeIn) } }

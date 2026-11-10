@@ -310,6 +310,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
         loadHidden()
         loadFavs()
         loadResume()
+        loadRecents()
         loadPlaylists()
         // Films et séries : fichier « accueil » (affiches déjà triées) -> l'écran s'affiche tout de suite
         for (k in listOf("vod", "series")) {
@@ -801,6 +802,35 @@ class Repo(private val ctx: Context, val api: Xtream) {
 
     fun resumeFor(url: String): Resume? = resumes.firstOrNull { it.url == url }
 
+    // ---------------- Chaînes regardées récemment ----------------
+    val recents = mutableStateListOf<Item>()
+
+    private fun persistRecents() {
+        try {
+            val t = f("recents.tmp")
+            t.bufferedWriter().use { w -> recents.forEach { w.write(itemLine(it)); w.newLine() } }
+            t.renameTo(f("recents.tsv"))
+        } catch (e: Exception) { /* ignoré */ }
+    }
+
+    private fun loadRecents() {
+        recents.clear()
+        val fr = f("recents.tsv")
+        if (!fr.exists()) return
+        try {
+            fr.readLines().forEach { l -> parseItem(l.split('\t'))?.let { recents.add(it) } }
+        } catch (e: Exception) { /* ignoré */ }
+    }
+
+    /** Note une chaîne comme « regardée » : elle passe en tête de la catégorie « Récemment regardées ». */
+    fun addRecent(item: Item) {
+        if (recents.firstOrNull()?.id == item.id) return
+        recents.removeAll { it.id == item.id }
+        recents.add(0, item)
+        while (recents.size > 30) recents.removeAt(recents.size - 1)
+        persistRecents()
+    }
+
     // ---------------- Synchronisation entre appareils ----------------
     var cloudOn by mutableStateOf(prefs.getBoolean("cloud_on", true))
         private set
@@ -838,9 +868,41 @@ class Repo(private val ctx: Context, val api: Xtream) {
         if (b) scheduleCloud()
     }
 
+    /** Code court (6 caractères) à saisir sur un autre appareil. */
+    var cloudShort by mutableStateOf(prefs.getString("cloud_short", "") ?: "")
+        private set
+
     private fun saveCloudId(id: String) {
+        if (id != cloudId) {
+            // autre espace : l'ancien code court ne correspond plus
+            cloudShort = ""
+            prefs.edit().remove("cloud_short").apply()
+        }
         cloudId = id
         prefs.edit().putString("cloud_id", id).apply()
+    }
+
+    private fun saveShort(code: String) {
+        cloudShort = code
+        prefs.edit().putString("cloud_short", code).apply()
+    }
+
+    /** Crée (une seule fois) le code court de cet espace et l'enregistre pour que les autres appareils le retrouvent. */
+    private suspend fun ensureShortCode(id: String) {
+        if (cloudShort.isNotBlank() || id.isBlank()) return
+        val alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+        val rnd = java.security.SecureRandom()
+        repeat(5) {
+            val c = String(CharArray(6) { alphabet[rnd.nextInt(alphabet.length)] })
+            val key = "kineo-code-" + c.lowercase()
+            val (code, found) = withContext(Dispatchers.IO) { Cloud.getPointer(key) }
+            if (code < 0) return
+            if (found == null) {
+                val ok = withContext(Dispatchers.IO) { Cloud.setPointer(key, id) }
+                if (ok) saveShort(c)
+                return
+            }
+        }
     }
 
     private fun itemJson(i: Item): JSONObject = JSONObject()
@@ -1054,6 +1116,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
                     withContext(Dispatchers.IO) { Cloud.putBlob(id, snap) }
                 }
             }
+            ensureShortCode(cloudId)
             val now = System.currentTimeMillis()
             cloudLast = now
             prefs.edit().putLong("cloud_last", now).apply()
@@ -1069,12 +1132,27 @@ class Repo(private val ctx: Context, val api: Xtream) {
 
     /** Code saisi à la main (affiché dans Réglages d'un autre appareil). */
     suspend fun useCloudCode(code: String) {
-        val id = code.trim().filter { it.isLetterOrDigit() || it == '-' }
-        if (id.length < 6) {
+        val raw = code.trim().filter { it.isLetterOrDigit() || it == '-' }
+        if (raw.length < 4) {
             cloudMsg = "Code invalide"
             return
         }
+        var id = raw
+        var short = ""
+        if (raw.length <= 10) {
+            // code court : on retrouve l'espace correspondant
+            cloudMsg = "Recherche du code…"
+            val (c, found) = withContext(Dispatchers.IO) { Cloud.getPointer("kineo-code-" + raw.lowercase()) }
+            if (found == null) {
+                cloudMsg = if (c < 0) "Code introuvable : pas de réseau (${Cloud.lastErr})"
+                else "Code introuvable (${Cloud.lastErr.ifBlank { "vérifie les caractères" }})"
+                return
+            }
+            id = found
+            short = raw.uppercase()
+        }
         saveCloudId(id)
+        if (short.isNotBlank()) saveShort(short)
         withContext(Dispatchers.IO) { Cloud.setPointer(Cloud.pointerKey(api.key), id) }
         syncCloud()
     }
@@ -1085,8 +1163,11 @@ class Repo(private val ctx: Context, val api: Xtream) {
         if (t.length < 2) {
             Triple(emptyList<Item>(), emptyList<Item>(), emptyList<Item>())
         } else {
+            // Films et séries : les catégories / éléments masqués sont exclus. Chaînes TV : aucun filtre.
             fun find(k: String): List<Item> =
-                data[k]?.all?.filter { it.name.contains(t, ignoreCase = true) }?.take(200) ?: emptyList()
+                data[k]?.all?.filter {
+                    it.name.contains(t, ignoreCase = true) && (k == "live" || !isHidden(k, it))
+                }?.take(200) ?: emptyList()
             Triple(find("live"), find("vod"), find("series"))
         }
     }

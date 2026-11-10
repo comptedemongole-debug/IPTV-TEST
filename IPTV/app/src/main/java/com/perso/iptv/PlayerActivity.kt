@@ -531,6 +531,7 @@ class PlayerActivity : ComponentActivity() {
         if (i !in Zap.items.indices) return
         Zap.index = i
         val ch = Zap.items[i]
+        Zap.repo?.addRecent(ch)
         if (exo === Preview.player) Preview.item = ch
         start(a.liveUrl(ch.id))
         flash()

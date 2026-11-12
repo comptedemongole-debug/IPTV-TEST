@@ -53,3 +53,22 @@ reglages de mise a jour (chaque jour / 3 jours / semaine / mois) pour le contenu
 === Version 3.4.1 ===
 - Films / Séries : catalogue plus dense. Affiches de 108 dp (au lieu de 124) pour voir plus de titres par rangée.
 - Bannière complète (image, infos, synopsis, boutons) en haut de page ; quand on descend dans les rangées elle se réduit (même image et mêmes infos, synopsis sur 2 lignes, sans boutons) pour afficher 2 rangées complètes.
+
+=== Version 3.4.2 ===
+- Lecteur (films, séries, chaînes) : le menu « Prog » ne contient plus que la liste (épisodes de la série avec leurs titres, chaînes, films de la catégorie / playlist) et s'ouvre sur l'élément en cours.
+- Nouvelle roue crantée en haut à droite : vitesse, passer l'intro, minuteur de sommeil, piste audio, sous-titres (piste + taille). Touche « Réglages » de la télécommande = même menu.
+
+=== Version 3.4.3 ===
+- Menu Prog des séries : les titres d'épisodes de TOUTES les saisons viennent de TMDB (avant, seule la saison ouverte sur la fiche les avait). Les saisons TMDB déjà chargées sont mises en cache.
+
+=== Version 3.4.4 ===
+- Flèches ← → pendant un film / épisode : sauts de 10 s sans afficher les commandes (on peut spammer ; 30 s puis 60 s si on enchaîne).
+- Séries : bouton « Passer l'intro » (↓ pour le sélectionner, OK pour sauter) au début de l'épisode.
+- Séries : carte « épisode suivant » en bas à droite 15 s avant la fin (image + titre TMDB). OK = lancer tout de suite, Retour = annuler. Compte à rebours si « Lecture automatique » est activée.
+- Vitesse : réappliquée à chaque lecture + message « Vitesse : x ».
+
+=== Version 3.4.5 ===
+- Onglet Masqués : textes inutiles retirés (champ « Rechercher une catégorie » tout simple, titres raccourcis, plus de texte d'aide quand la liste est vide).
+
+=== Version 3.4.6 ===
+- Menu Prog des séries : rangée de saisons en haut (← → pour changer, OK pour afficher), puis les épisodes de la saison choisie en dessous. Retour remonte sur les saisons, un second Retour ferme le menu.

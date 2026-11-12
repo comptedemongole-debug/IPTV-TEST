@@ -15,12 +15,16 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -29,6 +33,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -40,6 +46,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -64,6 +71,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
+import coil.load
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -92,6 +100,10 @@ object Zap {
     var queueIsPlaylist: Boolean = false
     var queueName: String? = null
 
+    /** Série en cours de lecture : sert à retrouver les vrais titres d'épisodes (TMDB) de toutes les saisons. */
+    var seriesName: String = ""
+    var tmdbId: String = ""
+
     /** Vrai tant qu'un lecteur plein écran est ouvert : les mises à jour en arrière-plan se mettent en pause. */
     @Volatile var playing: Boolean = false
 }
@@ -112,6 +124,26 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var info: TextView
     private lateinit var menuView: ComposeView
     private lateinit var progBtn: TextView
+    private lateinit var gearBtn: TextView
+    private lateinit var introBtn: TextView          // « Passer l'intro » (séries)
+    private lateinit var nextCard: LinearLayout      // carte « épisode suivant » (séries, 15 s avant la fin)
+    private lateinit var nextImg: ImageView
+    private lateinit var nextTitle: TextView
+    private lateinit var nextCount: TextView
+    private var introDismissed = false
+    private var nextDismissed = false
+    private var noAutoNext = false                   // « Retour » sur la carte : pas de lecture auto pour cet épisode
+    private var swallowBackUp = false
+    private var nextShownFor = -1
+    private var seekStreak = 0
+    private var lastSeekAt = 0L
+    private var lastSeekDir = 0
+    private val overlayTask = object : Runnable {
+        override fun run() {
+            overlayTick()
+            handler.postDelayed(this, 500)
+        }
+    }
     private val handler = Handler(Looper.getMainLooper())
     private val hideTask = Runnable { info.visibility = View.GONE }
     private var live = false
@@ -155,10 +187,13 @@ class PlayerActivity : ComponentActivity() {
     private var imgX: String? = null
     private var kindX = "vod"
     private var menuOpen by mutableStateOf(false)
+    private var menuMode by mutableStateOf(0)   // 0 = Prog (épisodes / chaînes / films), 1 = Réglages (roue crantée)
     private var menuEntries by mutableStateOf<List<MenuEntry>>(emptyList())
     private var menuPinned by mutableStateOf<MenuEntry.Row?>(null)
     private var menuTitle by mutableStateOf("")
     private var menuSub by mutableStateOf("")
+    private var menuSeasons by mutableStateOf<List<String>>(emptyList())   // Prog des séries : liste des saisons
+    private var menuSeason by mutableStateOf("")                          // saison affichée
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -202,7 +237,11 @@ class PlayerActivity : ComponentActivity() {
         menuView = ComposeView(this)
         menuView.setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = MENU_ACCENT)) {
-                if (menuOpen) PlayerMenu(menuEntries, menuPinned, menuTitle, menuSub) { closeMenu() }
+                if (menuOpen) PlayerMenu(
+                        menuEntries, menuPinned, menuTitle, menuSub, if (menuMode == 1) "Réglages" else "≡  Prog", menuMode == 1,
+                        if (menuMode == 0) menuSeasons else emptyList(), menuSeason,
+                        { sn -> menuSeason = sn; menuEntries = buildMenu() }
+                    ) { closeMenu() }
             }
         }
 
@@ -221,6 +260,32 @@ class PlayerActivity : ComponentActivity() {
             progBtn.background = progBg(hasFocus)
             if (hasFocus) view.showController()
         }
+        gearBtn = TextView(this)
+        gearBtn.text = "⚙"
+        gearBtn.textSize = 20f
+        gearBtn.setTextColor(AColor.WHITE)
+        gearBtn.gravity = Gravity.CENTER
+        gearBtn.setPadding(26, 18, 26, 18)
+        gearBtn.isFocusable = true
+        gearBtn.isFocusableInTouchMode = true
+        gearBtn.isClickable = true
+        gearBtn.contentDescription = "Réglages du lecteur"
+        gearBtn.background = progBg(false)
+        gearBtn.visibility = View.GONE
+        try {
+            val ic = androidx.core.content.ContextCompat.getDrawable(this, R.drawable.ic_settings)
+            if (ic != null) {
+                val sz = (30 * resources.displayMetrics.density).toInt()
+                ic.setBounds(0, 0, sz, sz)
+                gearBtn.text = ""
+                gearBtn.setCompoundDrawables(ic, null, null, null)
+            }
+        } catch (e: Exception) { /* repli : le caractère ⚙ reste affiché */ }
+        gearBtn.setOnClickListener { openMenu(true) }
+        gearBtn.setOnFocusChangeListener { _, hasFocus ->
+            gearBtn.background = progBg(hasFocus)
+            if (hasFocus) view.showController()
+        }
         subSizeIdx = try {
             getSharedPreferences("kineo_player", MODE_PRIVATE).getInt("sub_size", 1).coerceIn(0, subSizes.size - 1)
         } catch (e: Exception) { 1 }
@@ -228,7 +293,9 @@ class PlayerActivity : ComponentActivity() {
         view.controllerShowTimeoutMs = 8000
         view.setControllerVisibilityListener(object : PlayerView.ControllerVisibilityListener {
             override fun onVisibilityChanged(visibility: Int) {
-                progBtn.visibility = if (visibility == View.VISIBLE && !menuOpen) View.VISIBLE else View.GONE
+                val vis = if (visibility == View.VISIBLE && !menuOpen) View.VISIBLE else View.GONE
+                progBtn.visibility = vis
+                gearBtn.visibility = vis
             }
         })
 
@@ -237,12 +304,79 @@ class PlayerActivity : ComponentActivity() {
         root.addView(menuView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         val lp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp.gravity = Gravity.TOP or Gravity.END
-        lp.setMargins(0, 48, 48, 0)
+        lp.setMargins(0, 48, 200, 0)
         root.addView(info, lp)
         val lp2 = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp2.gravity = Gravity.TOP or Gravity.START
         lp2.setMargins(48, 48, 0, 0)
         root.addView(progBtn, lp2)
+        val lp3 = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp3.gravity = Gravity.TOP or Gravity.END
+        lp3.setMargins(0, 48, 48, 0)
+        root.addView(gearBtn, lp3)
+
+        // --- bouton « Passer l'intro » (↓ pour le sélectionner, OK pour sauter)
+        introBtn = TextView(this)
+        introBtn.text = "↓  Passer l'intro"
+        introBtn.textSize = 18f
+        introBtn.typeface = android.graphics.Typeface.DEFAULT_BOLD
+        introBtn.setTextColor(AColor.WHITE)
+        introBtn.gravity = Gravity.CENTER
+        introBtn.setPadding(dpx(26), dpx(14), dpx(26), dpx(14))
+        introBtn.isFocusable = true
+        introBtn.isFocusableInTouchMode = true
+        introBtn.isClickable = true
+        introBtn.background = overlayBg(false, 8)
+        introBtn.visibility = View.GONE
+        introBtn.setOnClickListener { skipIntro() }
+        introBtn.setOnFocusChangeListener { _, f ->
+            introBtn.background = overlayBg(f, 8)
+            introBtn.setTextColor(if (f) AColor.BLACK else AColor.WHITE)
+            introBtn.text = if (f) "Passer l'intro  ›" else "↓  Passer l'intro"
+        }
+        val lp4 = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp4.gravity = Gravity.BOTTOM or Gravity.END
+        lp4.setMargins(0, 0, dpx(32), dpx(120))
+        root.addView(introBtn, lp4)
+
+        // --- carte « épisode suivant »
+        nextCard = LinearLayout(this)
+        nextCard.orientation = LinearLayout.VERTICAL
+        nextCard.setPadding(dpx(8), dpx(8), dpx(8), dpx(10))
+        nextCard.isFocusable = true
+        nextCard.isFocusableInTouchMode = true
+        nextCard.isClickable = true
+        nextCard.background = overlayBg(false, 12)
+        nextCard.visibility = View.GONE
+        nextImg = ImageView(this)
+        nextImg.scaleType = ImageView.ScaleType.CENTER_CROP
+        nextImg.setBackgroundColor(0xFF222230.toInt())
+        nextCard.addView(nextImg, LinearLayout.LayoutParams(dpx(260), dpx(146)))
+        val nextTag = TextView(this)
+        nextTag.text = "ÉPISODE SUIVANT"
+        nextTag.textSize = 11f
+        nextTag.setTextColor(0xFFC9C9D2.toInt())
+        nextTag.setPadding(dpx(2), dpx(8), 0, 0)
+        nextCard.addView(nextTag)
+        nextTitle = TextView(this)
+        nextTitle.textSize = 15f
+        nextTitle.typeface = android.graphics.Typeface.DEFAULT_BOLD
+        nextTitle.setTextColor(AColor.WHITE)
+        nextTitle.maxLines = 2
+        nextTitle.ellipsize = android.text.TextUtils.TruncateAt.END
+        nextTitle.setPadding(dpx(2), dpx(2), dpx(2), 0)
+        nextCard.addView(nextTitle, LinearLayout.LayoutParams(dpx(260), ViewGroup.LayoutParams.WRAP_CONTENT))
+        nextCount = TextView(this)
+        nextCount.textSize = 13f
+        nextCount.setTextColor(0xFFFF6B6F.toInt())
+        nextCount.setPadding(dpx(2), dpx(4), dpx(2), 0)
+        nextCard.addView(nextCount)
+        nextCard.setOnClickListener { playNextNow() }
+        nextCard.setOnFocusChangeListener { _, f -> nextCard.background = overlayBg(f, 12) }
+        val lp5 = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp5.gravity = Gravity.BOTTOM or Gravity.END
+        lp5.setMargins(0, 0, dpx(32), dpx(110))
+        root.addView(nextCard, lp5)
         setContentView(root)
         view.requestFocus()
 
@@ -251,8 +385,9 @@ class PlayerActivity : ComponentActivity() {
         if (live && Zap.items.isNotEmpty()) {
             flash()
         } else if (!live) {
+            enrichEpisodeTitles()
             flashMsg(
-                "OK puis ↑ : bouton « Prog »\nLecture automatique : " +
+                "OK puis ↑ : « Prog » (épisodes) à gauche, réglages ⚙ à droite\nLecture automatique : " +
                     (if (Zap.repo?.autoNext == true) "oui" else "non")
             )
         }
@@ -292,7 +427,7 @@ class PlayerActivity : ComponentActivity() {
                         .filter { it.isNotBlank() }.distinct().joinToString(", ")
                     flashMsg(
                         "Pas de son : format audio non pris en charge" + (if (codecs.isNotBlank()) " ($codecs)" else "") +
-                            ".\nMenu Prog > piste audio, ou Réglages > Son."
+                            ".\nRoue ⚙ (en haut à droite) > piste audio, ou Réglages > Son."
                     )
                 }
             }
@@ -307,6 +442,7 @@ class PlayerActivity : ComponentActivity() {
                     Player.STATE_READY -> {
                         bufSince = 0L
                         hasPlayed = true
+                        if (!live && Math.abs(p.playbackParameters.speed - speeds[speedIdx]) > 0.001f) p.setPlaybackSpeed(speeds[speedIdx])
                         if (readySince == 0L) readySince = now
                         failed = false
                         if (statusOn) clearStatus()
@@ -330,6 +466,12 @@ class PlayerActivity : ComponentActivity() {
         curUrl = url
         baseUrl = url
         retried = false
+        introDismissed = false
+        nextDismissed = false
+        noAutoNext = false
+        nextShownFor = -1
+        hideIntro()
+        hideNext()
         resetReliability()
         triedUrls.add(url)
         val p = exo ?: return
@@ -514,7 +656,7 @@ class PlayerActivity : ComponentActivity() {
         saveProgress()
         val auto = Zap.repo?.autoNext == true
         if (episodeContext()) {
-            if (auto && Zap.epIndex + 1 < Zap.eps.size) playEpisode(Zap.epIndex + 1)
+            if (auto && !noAutoNext && Zap.epIndex + 1 < Zap.eps.size) playEpisode(Zap.epIndex + 1)
         } else if (vodContext()) {
             if ((Zap.queueIsPlaylist || auto) && Zap.vodIndex + 1 < Zap.vodQueue.size) playMovie(Zap.vodIndex + 1)
         }
@@ -692,7 +834,7 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun refreshMenu() {
-        menuEntries = buildMenu()
+        menuEntries = if (menuMode == 1) buildSettings() else buildMenu()
     }
 
     private fun speedLabel(f: Float): String = (if (f == f.toInt().toFloat()) f.toInt().toString() else f.toString().replace('.', ',')) + "×"
@@ -722,6 +864,7 @@ class PlayerActivity : ComponentActivity() {
             out.add(MenuEntry.Row("Vitesse : ${speedLabel(speeds[speedIdx])}", "OK pour changer (0,75× à 2×)", false) {
                 speedIdx = (speedIdx + 1) % speeds.size
                 p.setPlaybackSpeed(speeds[speedIdx])
+                flashMsg("Vitesse : " + speedLabel(speeds[speedIdx]))
                 refreshMenu()
             })
             out.add(MenuEntry.Row("Passer l'intro (+90 s)", "avance de 1 min 30", false) {
@@ -797,11 +940,126 @@ class PlayerActivity : ComponentActivity() {
         if (n in 1..Zap.items.size) zapTo(n - 1) else flashMsg("Chaîne $n introuvable")
     }
 
-    private fun buildMenu(): List<MenuEntry> {
+    /** Réglages du lecteur (roue crantée) : lecture (vitesse, intro, minuteur), piste audio, sous-titres. */
+    private fun dpx(n: Int): Int = (n * resources.displayMetrics.density).toInt()
+
+    private fun overlayBg(focused: Boolean, radiusDp: Int): GradientDrawable {
+        val g = GradientDrawable()
+        g.cornerRadius = dpx(radiusDp).toFloat()
+        g.setColor(if (focused && radiusDp == 8) AColor.WHITE else 0xE6101018.toInt())
+        g.setStroke(dpx(if (focused) 3 else 1), if (focused) AColor.WHITE else 0x66FFFFFF)
+        return g
+    }
+
+    private fun hideIntro() {
+        if (!::introBtn.isInitialized) return
+        if (introBtn.visibility == View.VISIBLE) {
+            if (introBtn.hasFocus()) view.requestFocus()
+            introBtn.visibility = View.GONE
+        }
+    }
+
+    private fun hideNext() {
+        if (!::nextCard.isInitialized) return
+        if (nextCard.visibility == View.VISIBLE) {
+            if (nextCard.hasFocus()) view.requestFocus()
+            nextCard.visibility = View.GONE
+        }
+    }
+
+    private fun skipIntro() {
+        val p = exo ?: return
+        val dur = p.duration
+        var t = p.currentPosition + 90_000L
+        if (dur > 0) t = minOf(t, dur - 1000L)
+        t = maxOf(0L, t)
+        p.seekTo(t)
+        introDismissed = true
+        hideIntro()
+        flashMsg("Intro passée   " + fmtPos(t))
+    }
+
+    private fun playNextNow() {
+        val i = Zap.epIndex + 1
+        if (i < Zap.eps.size) {
+            hideNext()
+            playEpisode(i)
+        }
+    }
+
+    /** Toutes les 500 ms : affiche « Passer l'intro » au début d'un épisode et la carte « épisode suivant » 15 s avant la fin. */
+    private fun overlayTick() {
+        val p = exo
+        if (p == null || live || failed || menuOpen || !episodeContext()) {
+            hideIntro()
+            hideNext()
+            return
+        }
+        val dur = p.duration
+        val pos = p.currentPosition
+        val known = dur > 60_000L
+        val remaining = if (known) dur - pos else Long.MAX_VALUE
+
+        val introOn = !introDismissed && pos in 3_000L..180_000L && (!known || remaining > 20_000L)
+        if (introOn) {
+            if (introBtn.visibility != View.VISIBLE) introBtn.visibility = View.VISIBLE
+        } else hideIntro()
+
+        if (known && remaining > 16_000L) nextDismissed = false
+        val hasNext = Zap.epIndex + 1 < Zap.eps.size
+        if (hasNext && known && remaining in 0L..15_000L && !nextDismissed) {
+            val nx = Zap.eps[Zap.epIndex + 1]
+            if (nextShownFor != Zap.epIndex) {
+                nextShownFor = Zap.epIndex
+                nextTitle.text = nx.label
+                val img = nx.img
+                if (!img.isNullOrBlank()) nextImg.load(img) else nextImg.setImageDrawable(null)
+            }
+            val auto = Zap.repo?.autoNext == true
+            val sec = ((remaining + 999L) / 1000L).toInt()
+            nextCount.text = if (auto && !noAutoNext) "Lecture dans $sec s  ·  OK pour lancer" else "OK pour lancer"
+            if (nextCard.visibility != View.VISIBLE) {
+                hideIntro()
+                nextCard.visibility = View.VISIBLE
+                nextCard.requestFocus()
+            }
+        } else hideNext()
+    }
+
+    /** Remplace les titres d'épisodes de TOUTES les saisons par ceux de TMDB (la fiche série n'en chargeait qu'une). */
+    private fun enrichEpisodeTitles() {
+        val key = Zap.repo?.tmdbKey ?: return
+        val snapshot = Zap.eps
+        if (key.isBlank() || snapshot.isEmpty() || Zap.seriesName.isBlank()) return
+        val name = Zap.seriesName
+        scope.launch {
+            try {
+                var id = Zap.tmdbId
+                if (id.isBlank()) id = Tmdb.findTv(key, name) ?: return@launch
+                val maps = HashMap<String, Map<Int, TmEp>>()
+                for (s in snapshot.map { it.season }.distinct()) maps[s] = Tmdb.season(key, id, s)
+                if (Zap.eps !== snapshot) return@launch      // une autre série a pris la place entre-temps
+                Zap.eps = snapshot.map { e ->
+                    val t = maps[e.season]?.get(e.num.toIntOrNull() ?: -1)
+                    if (t == null || t.name.isBlank()) e
+                    else e.copy(label = "S${e.season} E${e.num.ifBlank { "?" }} · ${t.name}", img = t.still ?: e.img)
+                }
+                if (menuOpen && menuMode == 0) refreshMenu()
+            } catch (e: Exception) { /* on garde les titres actuels */ }
+        }
+    }
+
+    private fun buildSettings(): List<MenuEntry> {
         val out = ArrayList<MenuEntry>()
         out.addAll(playbackEntries())
         out.addAll(audioEntries())
         out.addAll(subtitleEntries())
+        return out
+    }
+
+    /** Menu Prog : uniquement la liste (chaînes, épisodes de la série, films de la catégorie / playlist). */
+    private fun buildMenu(): List<MenuEntry> {
+        val out = ArrayList<MenuEntry>()
         if (live) {
             out.add(MenuEntry.Header("Chaînes"))
             Zap.items.forEachIndexed { i, ch ->
@@ -809,13 +1067,9 @@ class PlayerActivity : ComponentActivity() {
                 out.add(MenuEntry.Row("${i + 1}   ${ch.name}", prog, i == Zap.index) { zapTo(i); closeMenu() })
             }
         } else if (episodeContext()) {
-            var season = ""
+            val shown = menuSeason.ifBlank { Zap.eps.getOrNull(Zap.epIndex)?.season ?: Zap.eps.first().season }
             Zap.eps.forEachIndexed { i, e ->
-                if (e.season != season) {
-                    season = e.season
-                    out.add(MenuEntry.Header("Saison $season"))
-                }
-                out.add(MenuEntry.Row(e.label, "", i == Zap.epIndex) { playEpisode(i); closeMenu() })
+                if (e.season == shown) out.add(MenuEntry.Row(e.label, "", i == Zap.epIndex) { playEpisode(i); closeMenu() })
             }
         } else {
             if (vodContext()) {
@@ -834,9 +1088,17 @@ class PlayerActivity : ComponentActivity() {
         return out
     }
 
-    private fun openMenu() {
-        menuEntries = buildMenu()
-        menuPinned = if (!live) autoToggleRow() else null
+    private fun openMenu(settings: Boolean = false) {
+        menuMode = if (settings) 1 else 0
+        if (!settings && !live && episodeContext()) {
+            menuSeasons = Zap.eps.map { it.season }.distinct()
+            menuSeason = Zap.eps.getOrNull(Zap.epIndex)?.season ?: menuSeasons.firstOrNull() ?: ""
+        } else {
+            menuSeasons = emptyList()
+            menuSeason = ""
+        }
+        menuEntries = if (settings) buildSettings() else buildMenu()
+        menuPinned = if (!live && !settings) autoToggleRow() else null
         val curEp = Zap.eps.getOrNull(Zap.epIndex)
         if (live) {
             menuTitle = Zap.items.getOrNull(Zap.index)?.name ?: ""
@@ -848,18 +1110,36 @@ class PlayerActivity : ComponentActivity() {
             menuTitle = titleX
             menuSub = "En cours de lecture"
         }
+        if (settings) menuSub = "Réglages du lecteur"
         menuOpen = true
+        hideIntro()
+        hideNext()
         progBtn.visibility = View.GONE
+        gearBtn.visibility = View.GONE
         menuView.requestFocus()
     }
 
     private fun closeMenu() {
         menuOpen = false
         view.requestFocus()
-        if (view.isControllerFullyVisible) progBtn.visibility = View.VISIBLE
+        if (view.isControllerFullyVisible) {
+            progBtn.visibility = View.VISIBLE
+            gearBtn.visibility = View.VISIBLE
+        }
     }
 
     override fun dispatchKeyEvent(e: KeyEvent): Boolean {
+        if (e.action == KeyEvent.ACTION_UP) {
+            val ku = e.keyCode
+            if (ku == KeyEvent.KEYCODE_BACK && swallowBackUp) {
+                swallowBackUp = false
+                return true
+            }
+            // Le relâchement de ← / → réveillait les commandes du lecteur : on l'absorbe, donc on peut spammer les sauts
+            if ((ku == KeyEvent.KEYCODE_DPAD_LEFT || ku == KeyEvent.KEYCODE_DPAD_RIGHT) &&
+                !menuOpen && !live && !failed && !view.isControllerFullyVisible
+            ) return true
+        }
         if (e.action == KeyEvent.ACTION_DOWN) {
             val k = e.keyCode
             // Touche « ≡ » de la télécommande (si la TV la transmet) : ouvre / ferme le menu Prog
@@ -867,22 +1147,50 @@ class PlayerActivity : ComponentActivity() {
                 retryAll()
                 return true
             }
+            if (k == KeyEvent.KEYCODE_SETTINGS) {
+                if (menuOpen) closeMenu() else openMenu(true)
+                return true
+            }
             if (k == KeyEvent.KEYCODE_MENU || k == KeyEvent.KEYCODE_GUIDE) {
                 if (menuOpen) closeMenu() else openMenu()
                 return true
             }
-            // Films / séries : ← −10 s, → +10 s quand les commandes sont cachées
+            // « Retour » sur la carte « épisode suivant » : on l'annule (et pas de lecture auto pour cet épisode)
+            if (k == KeyEvent.KEYCODE_BACK && !menuOpen && nextCard.visibility == View.VISIBLE) {
+                nextDismissed = true
+                noAutoNext = true
+                swallowBackUp = true
+                hideNext()
+                flashMsg("Lecture automatique annulée pour cet épisode")
+                return true
+            }
+            // ↓ : sélectionne le bouton « Passer l'intro » (OK pour sauter)
+            if (k == KeyEvent.KEYCODE_DPAD_DOWN && !menuOpen && !live && !failed && !view.isControllerFullyVisible &&
+                introBtn.visibility == View.VISIBLE && !introBtn.hasFocus()
+            ) {
+                introBtn.requestFocus()
+                return true
+            }
+            // Films / séries : ← −10 s, → +10 s (puis 30 s, 60 s si on enchaîne), sans afficher les commandes
             if (!menuOpen && !live && !failed && !view.isControllerFullyVisible &&
                 (k == KeyEvent.KEYCODE_DPAD_LEFT || k == KeyEvent.KEYCODE_DPAD_RIGHT)
             ) {
                 val p = exo
                 if (p != null) {
-                    val d = if (k == KeyEvent.KEYCODE_DPAD_LEFT) -10_000L else 10_000L
+                    val now = SystemClock.elapsedRealtime()
+                    if (e.repeatCount > 0 && now - lastSeekAt < 150L) return true   // touche maintenue : on limite le rythme
+                    val dir = if (k == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1
+                    seekStreak = if (dir == lastSeekDir && now - lastSeekAt < 700L) seekStreak + 1 else 1
+                    lastSeekDir = dir
+                    lastSeekAt = now
+                    val step = if (seekStreak < 6) 10_000L else if (seekStreak < 14) 30_000L else 60_000L
+                    val d = dir * step
                     val dur = p.duration
                     var t = p.currentPosition + d
                     if (dur > 0) t = minOf(t, dur - 1000L)
-                    p.seekTo(maxOf(0L, t))
-                    flashMsg((if (d < 0) "−10 s" else "+10 s") + "   " + fmtPos(maxOf(0L, t)))
+                    t = maxOf(0L, t)
+                    p.seekTo(t)
+                    flashMsg((if (d < 0) "−" else "+") + (step / 1000L) + " s   " + fmtPos(t))
                     return true
                 }
             }
@@ -919,11 +1227,14 @@ class PlayerActivity : ComponentActivity() {
         exo?.playWhenReady = true
         handler.removeCallbacks(watchdog)
         handler.postDelayed(watchdog, 1000)
+        handler.removeCallbacks(overlayTask)
+        handler.postDelayed(overlayTask, 500)
     }
 
     override fun onStop() {
         saveProgress()
         handler.removeCallbacks(watchdog)
+        handler.removeCallbacks(overlayTask)
         exo?.playWhenReady = false
         super.onStop()
     }
@@ -949,19 +1260,40 @@ class PlayerActivity : ComponentActivity() {
 }
 
 @Composable
-fun PlayerMenu(entries: List<MenuEntry>, pinned: MenuEntry.Row?, title: String, sub: String, onClose: () -> Unit) {
-    val sel = entries.indexOfLast { it is MenuEntry.Row && it.selected }.coerceAtLeast(0)
-    val state = rememberLazyListState(initialFirstVisibleItemIndex = maxOf(0, sel - 3))
+fun PlayerMenu(
+    entries: List<MenuEntry>, pinned: MenuEntry.Row?, title: String, sub: String, heading: String, settings: Boolean,
+    seasons: List<String>, season: String, onSeason: (String) -> Unit, onClose: () -> Unit
+) {
+    // Prog : on se place sur l'élément en cours ; Réglages : on commence tout en haut
+    val sel = if (settings) entries.indexOfFirst { it is MenuEntry.Row }.coerceAtLeast(0)
+        else entries.indexOfLast { it is MenuEntry.Row && it.selected }.coerceAtLeast(0)
+    val state = rememberLazyListState(initialFirstVisibleItemIndex = if (settings) 0 else maxOf(0, sel - 3))
     val fr = remember { FocusRequester() }
+    val chipFr = remember { FocusRequester() }
+    var chipsFocused by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) {
         delay(120)
         try { fr.requestFocus() } catch (e: Exception) { /* ignoré */ }
     }
-    BackHandler { onClose() }
+    // Quand on change de saison, la liste repart en haut
+    var firstSeason by remember { mutableStateOf(true) }
+    LaunchedEffect(season) {
+        if (firstSeason) firstSeason = false else state.scrollToItem(0)
+    }
+    // Retour : d'abord on remonte sur les saisons, ensuite seulement on ferme
+    BackHandler {
+        if (seasons.isNotEmpty() && !chipsFocused) {
+            scope.launch {
+                state.scrollToItem(0)
+                try { chipFr.requestFocus() } catch (e: Exception) { /* ignoré */ }
+            }
+        } else onClose()
+    }
     Row(Modifier.fillMaxSize()) {
         Column(Modifier.width(400.dp).fillMaxHeight().background(MENU_BG).padding(vertical = 16.dp)) {
             Text(
-                "≡  Prog", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFFC9C9D2),
+                heading, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFFC9C9D2),
                 modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 4.dp)
             )
             if (title.isNotBlank()) {
@@ -977,6 +1309,17 @@ fun PlayerMenu(entries: List<MenuEntry>, pinned: MenuEntry.Row?, title: String, 
                     modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp)
                 )
             }
+            if (seasons.isNotEmpty()) {
+                LazyRow(
+                    Modifier.fillMaxWidth().onFocusChanged { chipsFocused = it.hasFocus },
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(seasons) { sn ->
+                        SeasonChip("Saison $sn", sn == season, if (sn == season) Modifier.focusRequester(chipFr) else Modifier) { onSeason(sn) }
+                    }
+                }
+            }
             if (pinned != null) MenuRow(pinned, Modifier)
             LazyColumn(Modifier.fillMaxSize(), state = state) {
                 itemsIndexed(entries) { i, e ->
@@ -991,6 +1334,24 @@ fun PlayerMenu(entries: List<MenuEntry>, pinned: MenuEntry.Row?, title: String, 
             }
         }
     }
+}
+
+@Composable
+fun SeasonChip(label: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    var f by remember { mutableStateOf(false) }
+    Text(
+        label, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+        color = if (selected) Color.White else Color(0xFFC9C9D2),
+        modifier = modifier
+            .onFocusChanged { f = it.isFocused }
+            .background(
+                if (selected) MENU_ACCENT else if (f) Color(0x55FFFFFF) else Color(0x22FFFFFF),
+                RoundedCornerShape(99.dp)
+            )
+            .then(if (f) Modifier.border(2.dp, Color.White, RoundedCornerShape(99.dp)) else Modifier)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+    )
 }
 
 @Composable

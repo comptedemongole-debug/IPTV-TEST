@@ -44,8 +44,11 @@ object Tmdb {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, TmMovie>?): Boolean = size > 60
     }
 
+    private val seasonCache = HashMap<String, Map<Int, TmEp>>()
+
     fun clearCache() {
         synchronized(movieCache) { movieCache.clear() }
+        synchronized(seasonCache) { seasonCache.clear() }
     }
 
     suspend fun movie(key: String, tmdbId: String, name: String, year: String): TmMovie? = withContext(Dispatchers.IO) {
@@ -102,6 +105,8 @@ object Tmdb {
     }
 
     suspend fun season(key: String, tvId: String, season: String): Map<Int, TmEp> = withContext(Dispatchers.IO) {
+        val ck = "$tvId|$season"
+        synchronized(seasonCache) { seasonCache[ck] }?.let { return@withContext it }
         try {
             val arr = JSONObject(get("https://api.themoviedb.org/3/tv/$tvId/season/$season?api_key=$key&language=fr-FR"))
                 .optJSONArray("episodes")
@@ -117,6 +122,7 @@ object Tmdb {
                     )
                 }
             }
+            if (m.isNotEmpty()) synchronized(seasonCache) { seasonCache[ck] = m }
             m
         } catch (e: Exception) {
             emptyMap()

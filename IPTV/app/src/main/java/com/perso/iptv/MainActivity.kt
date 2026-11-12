@@ -139,7 +139,9 @@ private fun play(
     )
 }
 
-private fun setZapEpisodes(api: Xtream, series: Item, list: List<Ep>, current: Ep, tm: Map<String, Map<Int, TmEp>>, srcId: String = series.id) {
+private fun setZapEpisodes(api: Xtream, series: Item, list: List<Ep>, current: Ep, tm: Map<String, Map<Int, TmEp>>, srcId: String = series.id, tmdbId: String = "") {
+    Zap.seriesName = series.name
+    Zap.tmdbId = tmdbId
     Zap.eps = list.map { e ->
         val num = e.num.ifBlank { "?" }
         val tmName = tm[e.season]?.get(e.num.toIntOrNull() ?: -1)?.name
@@ -1103,7 +1105,7 @@ fun DetailScreen(
                     } else {
                         eps?.firstOrNull()?.let { e1 ->
                             ActionButton("▶ Lecture S${e1.season} E${e1.num.ifBlank { "1" }}", true) {
-                                eps?.let { setZapEpisodes(api, item, it, e1, tm) }
+                                eps?.let { setZapEpisodes(api, item, it, e1, tm, tmdbId = inf?.tmdb ?: "") }
                                 onPlay(
                                     api.epUrl(e1.id, e1.ext),
                                     "${item.name} · S${e1.season} E${e1.num.ifBlank { "1" }}",
@@ -1145,7 +1147,7 @@ fun DetailScreen(
                     LazyColumn(Modifier.fillMaxSize()) {
                         items(list.filter { it.season == sSel }) { ep ->
                             EpisodeRow(repo, api, item, ep, tm[sSel]?.get(ep.num.toIntOrNull() ?: -1)) { u, t, i, k, st ->
-                                setZapEpisodes(api, item, list, ep, tm)
+                                setZapEpisodes(api, item, list, ep, tm, tmdbId = inf?.tmdb ?: "")
                                 onPlay(u, t, i, k, st)
                             }
                         }
@@ -1710,7 +1712,7 @@ fun HiddenScreen(repo: Repo) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
                 kw, { kw = it }, singleLine = true,
-                placeholder = { Text("Rechercher une catégorie : DAZN, TURK…") },
+                placeholder = { Text("Rechercher une catégorie") },
                 modifier = Modifier.width(320.dp)
             )
             ActionButton(if (filtering) "✓ Cocher les ${cats.size} résultats" else "✓ Tout cocher", false) {
@@ -1727,7 +1729,7 @@ fun HiddenScreen(repo: Repo) {
         Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
             Column(Modifier.weight(1f)) {
                 Text(
-                    "Catégories (${cats.size}) : OK pour cocher ou décocher",
+                    "Catégories (${cats.size})",
                     fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = TXT
                 )
                 Spacer(Modifier.height(6.dp))
@@ -1739,14 +1741,8 @@ fun HiddenScreen(repo: Repo) {
                 }
             }
             Column(Modifier.weight(1f)) {
-                Text("Éléments masqués (OK pour réafficher)", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = TXT)
+                Text("Éléments masqués", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = TXT)
                 Spacer(Modifier.height(6.dp))
-                if (hiddenList.isEmpty() && hv >= 0) {
-                    Text(
-                        "Aucun pour l'instant. Pour masquer : page de détail d'un film ou d'une série, ou le panneau d'une chaîne dans l'onglet TV.",
-                        fontSize = 13.sp, color = MUTED
-                    )
-                }
                 LazyColumn {
                     items(hiddenList) { (key, name) -> FocusRow(name) { repo.showItem(key) } }
                 }

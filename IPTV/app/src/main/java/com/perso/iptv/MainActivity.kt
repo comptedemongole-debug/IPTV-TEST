@@ -1227,6 +1227,25 @@ fun LiveView(repo: Repo, data: Data, onHide: (Item) -> Unit, onHideCat: (Cat) ->
     }
     val listName = cats.firstOrNull { it.id == effId }?.name ?: ""
     val pItem = Preview.item
+    val mvCtx = LocalContext.current
+    val mvScope = rememberCoroutineScope()
+    // Multi-vue : plusieurs chaînes à l'écran (chaque fenêtre = une connexion chez le fournisseur)
+    val startMulti: () -> Unit = {
+        val cur0 = focusedCh ?: list.firstOrNull()
+        if (cur0 != null) {
+            mvScope.launch {
+                val mc = withContext(Dispatchers.IO) { repo.api.maxConnections() }
+                Zap.items = list
+                Zap.index = list.indexOfFirst { it.id == cur0.id }.coerceAtLeast(0)
+                Zap.api = repo.api
+                Zap.repo = repo
+                Zap.eps = emptyList()
+                Preview.release()
+                if (repo.autoBoost) Booster.trimOwnCaches(mvCtx.applicationContext)
+                mvCtx.startActivity(Intent(mvCtx, MultiViewActivity::class.java).putExtra("max", mc))
+            }
+        }
+    }
     // on quitte l'onglet TV : on coupe l'aperçu (sauf s'il est en plein écran)
     DisposableEffect(Unit) { onDispose { if (!Preview.lent) Preview.release() } }
     val openFull: () -> Unit = {
@@ -1276,6 +1295,7 @@ fun LiveView(repo: Repo, data: Data, onHide: (Item) -> Unit, onHideCat: (Cat) ->
             val curCat = data.cats.firstOrNull { it.id == effId }
             ChannelPanel(
                 repo, cur, curCat?.name, ev, Modifier.width(320.dp), pItem, openFull,
+                onMulti = startMulti,
                 onHideCat = {
                     curCat?.let { c ->
                         catId = cats.firstOrNull { it.id != c.id && !it.id.startsWith("__") }?.id
@@ -1359,7 +1379,7 @@ fun ChannelRow(repo: Repo, ch: Item, num: Int, ev: Int, onFocus: () -> Unit, onC
 @Composable
 fun ChannelPanel(
     repo: Repo, ch: Item?, catName: String?, ev: Int, modifier: Modifier,
-    previewItem: Item?, onPreviewClick: () -> Unit, onHideCat: () -> Unit, onHide: () -> Unit
+    previewItem: Item?, onPreviewClick: () -> Unit, onMulti: () -> Unit, onHideCat: () -> Unit, onHide: () -> Unit
 ) {
     val fmt = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
     var fb by remember(ch?.id) { mutableStateOf<List<Prog>>(emptyList()) }
@@ -1394,6 +1414,7 @@ fun ChannelPanel(
                 )
             }
             if (progs.isEmpty()) Text("Programme indisponible", color = MUTED, fontSize = 13.sp)
+            ActionButton("Multi-vue (plusieurs chaînes)", false, onMulti)
             ActionButton(if (repo.isFav("live", ch)) "★ Retirer des favoris" else "☆ Ajouter aux favoris", false) {
                 repo.toggleFav("live", ch)
             }
@@ -1821,7 +1842,7 @@ fun SettingsScreen(repo: Repo, scope: CoroutineScope, logout: () -> Unit) {
             }
         }
         Text(
-            "À activer seulement si tu n'as pas de son sur cet appareil (Chromecast…). Autre solution côté Chromecast : Paramètres, Affichage et son, Son surround, Jamais. Pendant la lecture : bouton Prog, puis « Piste audio ».",
+            "À activer seulement si tu n'as pas de son sur cet appareil (Chromecast…). Autre solution côté Chromecast : Paramètres, Affichage et son, Son surround, Jamais. Pendant la lecture : roue ⚙ en haut à droite, puis « Piste audio ».",
             fontSize = 12.sp, color = MUTED
         )
         Text(

@@ -20,6 +20,8 @@ class IptvApp : Application(), ImageLoaderFactory {
             // beaucoup de serveurs IPTV envoient « no-cache » : sans ça, chaque affiche est retéléchargée
             .respectCacheHeaders(false)
             .crossfade(false)
+            // affiches sans transparence : 2 octets par pixel au lieu de 4, donc moitié moins de mémoire
+            .allowRgb565(true)
             .build()
     }
 }

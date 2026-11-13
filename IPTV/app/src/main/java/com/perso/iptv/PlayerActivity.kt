@@ -290,7 +290,7 @@ class PlayerActivity : ComponentActivity() {
             getSharedPreferences("kineo_player", MODE_PRIVATE).getInt("sub_size", 1).coerceIn(0, subSizes.size - 1)
         } catch (e: Exception) { 1 }
         applySubSize()
-        view.controllerShowTimeoutMs = 8000
+        view.controllerShowTimeoutMs = 3000
         view.setControllerVisibilityListener(object : PlayerView.ControllerVisibilityListener {
             override fun onVisibilityChanged(visibility: Int) {
                 val vis = if (visibility == View.VISIBLE && !menuOpen) View.VISIBLE else View.GONE
@@ -941,6 +941,13 @@ class PlayerActivity : ComponentActivity() {
     }
 
     /** Réglages du lecteur (roue crantée) : lecture (vitesse, intro, minuteur), piste audio, sous-titres. */
+    /** ← / → servent aux sauts en film / série, commandes affichées ou non (sauf sur les boutons Prog et ⚙ du haut). */
+    private fun arrowsSeek(): Boolean =
+        !menuOpen && !live && !failed && exo != null && !progBtn.hasFocus() && !gearBtn.hasFocus()
+
+    /** ← / → ne doivent JAMAIS réveiller le lecteur : seuls ↑ / ↓ le font (sauf sur les boutons Prog / ⚙ où ← → servent à naviguer). */
+    private fun arrowsMute(): Boolean = !menuOpen && !progBtn.hasFocus() && !gearBtn.hasFocus()
+
     private fun dpx(n: Int): Int = (n * resources.displayMetrics.density).toInt()
 
     private fun overlayBg(focused: Boolean, radiusDp: Int): GradientDrawable {
@@ -1136,9 +1143,7 @@ class PlayerActivity : ComponentActivity() {
                 return true
             }
             // Le relâchement de ← / → réveillait les commandes du lecteur : on l'absorbe, donc on peut spammer les sauts
-            if ((ku == KeyEvent.KEYCODE_DPAD_LEFT || ku == KeyEvent.KEYCODE_DPAD_RIGHT) &&
-                !menuOpen && !live && !failed && !view.isControllerFullyVisible
-            ) return true
+            if ((ku == KeyEvent.KEYCODE_DPAD_LEFT || ku == KeyEvent.KEYCODE_DPAD_RIGHT) && arrowsMute()) return true
         }
         if (e.action == KeyEvent.ACTION_DOWN) {
             val k = e.keyCode
@@ -1164,6 +1169,14 @@ class PlayerActivity : ComponentActivity() {
                 flashMsg("Lecture automatique annulée pour cet épisode")
                 return true
             }
+            // ↑ / ↓ depuis le bouton « Passer l'intro » ou la carte « épisode suivant » : on réveille le lecteur
+            if ((k == KeyEvent.KEYCODE_DPAD_UP || k == KeyEvent.KEYCODE_DPAD_DOWN) && !menuOpen &&
+                (introBtn.hasFocus() || nextCard.hasFocus())
+            ) {
+                view.requestFocus()
+                view.showController()
+                return true
+            }
             // ↓ : sélectionne le bouton « Passer l'intro » (OK pour sauter)
             if (k == KeyEvent.KEYCODE_DPAD_DOWN && !menuOpen && !live && !failed && !view.isControllerFullyVisible &&
                 introBtn.visibility == View.VISIBLE && !introBtn.hasFocus()
@@ -1172,9 +1185,7 @@ class PlayerActivity : ComponentActivity() {
                 return true
             }
             // Films / séries : ← −10 s, → +10 s (puis 30 s, 60 s si on enchaîne), sans afficher les commandes
-            if (!menuOpen && !live && !failed && !view.isControllerFullyVisible &&
-                (k == KeyEvent.KEYCODE_DPAD_LEFT || k == KeyEvent.KEYCODE_DPAD_RIGHT)
-            ) {
+            if ((k == KeyEvent.KEYCODE_DPAD_LEFT || k == KeyEvent.KEYCODE_DPAD_RIGHT) && arrowsSeek()) {
                 val p = exo
                 if (p != null) {
                     val now = SystemClock.elapsedRealtime()
@@ -1194,6 +1205,7 @@ class PlayerActivity : ComponentActivity() {
                     return true
                 }
             }
+            if ((k == KeyEvent.KEYCODE_DPAD_LEFT || k == KeyEvent.KEYCODE_DPAD_RIGHT) && arrowsMute()) return true
             if (!menuOpen && live && Zap.items.isNotEmpty()) {
                 val d = digitOf(k)
                 if (d >= 0) {

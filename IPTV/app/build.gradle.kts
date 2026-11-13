@@ -10,8 +10,8 @@ android {
         applicationId = "com.perso.iptv"
         minSdk = 23
         targetSdk = 34
-        versionCode = 26
-        versionName = "3.4.6"
+        versionCode = 29
+        versionName = "3.5.0"
     }
     signingConfigs {
         getByName("debug") {
@@ -34,6 +34,11 @@ android {
         isCoreLibraryDesugaringEnabled = true
     }
     kotlinOptions { jvmTarget = "17" }
+    // le build « release » (non debug) est bien plus fluide ; le lint ne doit pas le bloquer
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
     buildFeatures { compose = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
 }

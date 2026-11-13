@@ -72,3 +72,17 @@ reglages de mise a jour (chaque jour / 3 jours / semaine / mois) pour le contenu
 
 === Version 3.4.6 ===
 - Menu Prog des séries : rangée de saisons en haut (← → pour changer, OK pour afficher), puis les épisodes de la saison choisie en dessous. Retour remonte sur les saisons, un second Retour ferme le menu.
+
+=== Version 3.4.7 ===
+- Films / séries : ← → sautent TOUJOURS (même si les commandes du lecteur sont affichées), sans les réveiller ; spam possible. Les commandes restent affichées 3 s au lieu de 8 s.
+
+=== Version 3.4.8 ===
+- ← et → ne réveillent plus jamais le lecteur (films, séries et direct). Seuls ↑ et ↓ affichent les commandes.
+
+=== Version 3.5.0 ===
+- NOUVEAU : Multi-vue (onglet TV > bouton « Multi-vue » du panneau de droite). 2 ou 4 chaînes en même temps ; le son suit le cadre blanc.
+  ← ↑ ↓ → : choisir la fenêtre · OK : changer de chaîne (catégories puis chaînes) · OK long : plein écran · MENU ou OK > « Afficher 2 / 4 fenêtres » · Retour : quitter.
+  Chaque fenêtre = une connexion chez le fournisseur : l'appli lit le nombre de connexions de l'abonnement (1 = refus avec message, 2-3 = 2 fenêtres, 4+ = 4 fenêtres).
+  Définition plafonnée (720p pour 2 fenêtres, 540p pour 4), tampons courts, un seul son décodé.
+- Performances : build « release » (non debug, profils de démarrage Compose actifs), affiches en RGB565 (moitié moins de mémoire).
+  Le fichier publié garde le nom app-debug.apk : ton lien Downloader ne change pas. Si le build release échoue, le workflow retombe sur le debug.

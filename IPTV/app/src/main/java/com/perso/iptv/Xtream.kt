@@ -80,6 +80,16 @@ class Xtream(server: String, private val user: String, private val pass: String)
         }
     }
 
+    /** Connexions simultanées autorisées par l'abonnement (0 = inconnu). La multi-vue en a besoin de plusieurs. */
+    suspend fun maxConnections(): Int = withContext(Dispatchers.IO) {
+        try {
+            val ui = JSONObject(call("")).optJSONObject("user_info")
+            ui?.str("max_connections")?.trim()?.toIntOrNull() ?: 0
+        } catch (e: Exception) {
+            0
+        }
+    }
+
     suspend fun cats(kind: String): List<Cat> = withContext(Dispatchers.IO) {
         val a = JSONArray(call("action=get_${kind}_categories"))
         (0 until a.length()).map {

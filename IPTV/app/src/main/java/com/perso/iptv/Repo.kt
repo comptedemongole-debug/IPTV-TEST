@@ -311,6 +311,7 @@ class Repo(private val ctx: Context, val api: Xtream) {
         loadFavs()
         loadResume()
         loadRecents()
+        loadWatched()
         loadPlaylists()
         // Films et séries : fichier « accueil » (affiches déjà triées) -> l'écran s'affiche tout de suite
         for (k in listOf("vod", "series")) {
@@ -801,6 +802,34 @@ class Repo(private val ctx: Context, val api: Xtream) {
     }
 
     fun resumeFor(url: String): Resume? = resumes.firstOrNull { it.url == url }
+
+    // ---------------- Épisodes vus (coche verte) ----------------
+    val watched = mutableStateListOf<String>()
+
+    /** Clé d'un épisode = son identifiant dans l'URL (sans l'identifiant / mot de passe, qui peuvent changer). */
+    fun epKey(url: String): String = url.substringAfterLast('/').substringBeforeLast('.')
+
+    fun isWatched(url: String): Boolean = watched.contains(epKey(url))
+
+    fun markWatched(url: String) {
+        val k = epKey(url)
+        if (k.isBlank() || watched.contains(k)) return
+        watched.add(k)
+        try {
+            val t = f("watched.tmp")
+            t.writeText(watched.joinToString("\n"))
+            t.renameTo(f("watched.tsv"))
+        } catch (e: Exception) { /* ignoré */ }
+    }
+
+    private fun loadWatched() {
+        watched.clear()
+        val fr = f("watched.tsv")
+        if (!fr.exists()) return
+        try {
+            fr.readLines().filter { it.isNotBlank() }.forEach { watched.add(it) }
+        } catch (e: Exception) { /* ignoré */ }
+    }
 
     // ---------------- Chaînes regardées récemment ----------------
     val recents = mutableStateListOf<Item>()

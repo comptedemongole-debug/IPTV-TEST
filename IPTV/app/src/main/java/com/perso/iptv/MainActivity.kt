@@ -268,7 +268,12 @@ fun App() {
             api = Xtream(s, u, p)
         }
     } else {
-        Home(a) {
+        Home(a, changeAccount = { s, u, p ->
+            // on change seulement les identifiants : catégories, masqués, favoris, playlists, reprises restent en place
+            Preview.release()
+            prefs.edit().putString("server", s).putString("user", u).putString("pass", p).apply()
+            api = Xtream(s, u, p)
+        }) {
             Repo.wipe(ctx)
             prefs.edit().clear().apply()
             api = null
@@ -356,7 +361,7 @@ fun Login(onOk: (String, String, String) -> Unit) {
 }
 
 @Composable
-fun Home(api: Xtream, logout: () -> Unit) {
+fun Home(api: Xtream, changeAccount: (String, String, String) -> Unit, logout: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val repo = remember(api) { Repo.obtain(ctx.applicationContext, api) }
@@ -463,7 +468,7 @@ fun Home(api: Xtream, logout: () -> Unit) {
                             play(ctx, u, m.name, false, m.img, "vod", repo.resumeFor(u)?.pos ?: 0L)
                         }
                     }
-                    tab == 5 -> SettingsScreen(repo, scope, logout)
+                    tab == 5 -> SettingsScreen(repo, scope, changeAccount, logout)
                     vis == null -> LoadingView(repo, cacheLoaded) { scope.launch { repo.refreshContent(true) } }
                     vis.cats.isEmpty() -> Box(Modifier.fillMaxSize(), Alignment.Center) {
                         Text(
@@ -1194,7 +1199,10 @@ fun EpisodeRow(
         Column(Modifier.weight(1f)) {
             val epName = tm?.name?.takeIf { it.isNotBlank() } ?: cleanEpTitle(ep.title, series.name, label)
             val epPlot = (tm?.overview ?: "").ifBlank { ep.plot }
-            Text("$label.  $epName", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = TXT, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (repo.isWatched(url)) Text("✓  ", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color(0xFF3DD68C))
+                Text("$label.  $epName", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = TXT, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
             if (ep.duration.isNotBlank()) Text(ep.duration, fontSize = 12.sp, color = MUTED)
             if (epPlot.isNotBlank()) Text(epPlot, fontSize = 12.sp, color = MUTED, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
@@ -1774,8 +1782,17 @@ fun HiddenScreen(repo: Repo) {
 
 // ---------------------------------------------------------------- Réglages
 @Composable
-fun SettingsScreen(repo: Repo, scope: CoroutineScope, logout: () -> Unit) {
+fun SettingsScreen(repo: Repo, scope: CoroutineScope, changeAccount: (String, String, String) -> Unit, logout: () -> Unit) {
     var confirm by remember { mutableStateOf(false) }
+    val accCtx = LocalContext.current
+    val accPrefs = remember { accCtx.getSharedPreferences("iptv", Context.MODE_PRIVATE) }
+    var editAcc by remember { mutableStateOf(false) }
+    var accMsg by remember { mutableStateOf("") }
+    var updRel by remember { mutableStateOf<Updater.Release?>(null) }
+    var updMsg by remember { mutableStateOf("") }
+    var updBusy by remember { mutableStateOf(false) }
+    val accServer = accPrefs.getString("server", "") ?: ""
+    val accUser = accPrefs.getString("user", "") ?: ""
     val opts = listOf(1 to "Chaque jour", 3 to "Tous les 3 jours", 7 to "Chaque semaine", 30 to "Chaque mois")
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 32.dp, vertical = 8.dp),
@@ -1916,7 +1933,68 @@ fun SettingsScreen(repo: Repo, scope: CoroutineScope, logout: () -> Unit) {
         )
         if (repo.status.isNotBlank()) Text(repo.status, fontSize = 13.sp, color = ACCENT)
         Spacer(Modifier.height(8.dp))
+        Text("Mise à jour de l'appli", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = TXT)
+        Text("Version installée : ${Updater.installedName(accCtx)}", fontSize = 13.sp, color = MUTED)
+        ActionButton(if (updBusy) "Patiente…" else "Rechercher une mise à jour", false) {
+            if (!updBusy) {
+                updBusy = true
+                updRel = null
+                updMsg = "Recherche en cours…"
+                scope.launch {
+                    val (rel, err) = Updater.latest(accCtx)
+                    updBusy = false
+                    if (rel == null) {
+                        updMsg = err ?: "Impossible de lire les versions."
+                    } else if (rel.versionCode > 0 && rel.versionCode.toLong() <= Updater.installedCode(accCtx)) {
+                        updMsg = "Tu as déjà la dernière version."
+                    } else {
+                        updRel = rel
+                        updMsg = if (rel.versionCode > 0) "Nouvelle version disponible (${rel.tag})."
+                        else "Dernière version publiée : ${rel.tag} (impossible de la comparer à la tienne)."
+                    }
+                }
+            }
+        }
+        updRel?.let { rel ->
+            ActionButton(if (updBusy) "Téléchargement…" else "Télécharger et installer ${rel.tag}", true) {
+                if (!updBusy) {
+                    updBusy = true
+                    updMsg = "Téléchargement… 0 %"
+                    scope.launch {
+                        val f = Updater.download(accCtx, rel) { pct -> updMsg = "Téléchargement… $pct %" }
+                        updBusy = false
+                        updMsg = if (f == null) "Téléchargement impossible : vérifie le réseau et réessaie."
+                        else Updater.install(accCtx, f) ?: "Installation lancée : valide sur l'écran de ta TV."
+                    }
+                }
+            }
+        }
+        if (updMsg.isNotBlank()) Text(updMsg, fontSize = 13.sp, color = ACCENT)
+        Text(
+            "L'appli lit la dernière version publiée sur ton GitHub, la télécharge puis lance l'installation, sans passer par Downloader. Ton dépôt doit être public.",
+            fontSize = 12.sp, color = MUTED
+        )
+        Spacer(Modifier.height(8.dp))
+        Text("Compte IPTV", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = TXT)
+        Text("Serveur : $accServer   ·   Identifiant : $accUser", fontSize = 13.sp, color = MUTED)
+        ActionButton("Modifier les identifiants", false) { editAcc = true }
+        Text(
+            "Change le serveur, l'identifiant ou le mot de passe sans te déconnecter : catégories, masqués, favoris, playlists, reprises et coches « vu » sont conservés.",
+            fontSize = 12.sp, color = MUTED
+        )
+        if (accMsg.isNotBlank()) Text(accMsg, fontSize = 13.sp, color = ACCENT)
+        Spacer(Modifier.height(8.dp))
         ActionButton("Changer de compte", false) { confirm = true }
+    }
+    if (editAcc) {
+        AccountDialog(
+            accServer, accUser, accPrefs.getString("pass", "") ?: "",
+            onDismiss = { editAcc = false }
+        ) { s, u, p ->
+            editAcc = false
+            accMsg = "Identifiants mis à jour : tes catégories, masqués, favoris, playlists et reprises sont conservés."
+            changeAccount(s, u, p)
+        }
     }
     if (confirm) {
         AlertDialog(
@@ -1927,6 +2005,79 @@ fun SettingsScreen(repo: Repo, scope: CoroutineScope, logout: () -> Unit) {
             text = { Text("Les données enregistrées seront effacées et rechargées avec le nouveau compte.") }
         )
     }
+}
+
+/** Modifier serveur / identifiant / mot de passe sans se déconnecter : on vérifie d'abord que les nouveaux identifiants fonctionnent. */
+@Composable
+fun AccountDialog(
+    server0: String, user0: String, pass0: String,
+    onDismiss: () -> Unit, onSaved: (String, String, String) -> Unit
+) {
+    var s by remember { mutableStateOf(server0) }
+    var u by remember { mutableStateOf(user0) }
+    var p by remember { mutableStateOf(pass0) }
+    var busy by remember { mutableStateOf(false) }
+    var msg by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    val focus = LocalFocusManager.current
+
+    fun save() {
+        if (busy) return
+        var server = s.trim()
+        var user = u.trim()
+        var pass = p.trim()
+        // lien complet collé (get.php?username=…&password=…) : on en extrait tout
+        val mu = Regex("username=([^&\\s]+)").find(server)
+        val mp = Regex("password=([^&\\s]+)").find(server)
+        if (mu != null && mp != null) {
+            user = mu.groupValues[1]
+            pass = mp.groupValues[1]
+            server = server.substringBefore("/get.php").substringBefore("/player_api.php").substringBefore("/xmltv.php")
+        }
+        if (server.isNotBlank() && !server.startsWith("http")) server = "http://$server"
+        if (server == "http://" || user.isBlank() || pass.isBlank()) {
+            msg = "Remplis le serveur, l'identifiant et le mot de passe."
+            return
+        }
+        focus.clearFocus()
+        busy = true
+        msg = "Vérification…"
+        scope.launch {
+            val r = Xtream(server, user, pass).check()
+            busy = false
+            if (r == null) onSaved(server, user, pass) else msg = r
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        confirmButton = { TextButton(onClick = { save() }) { Text(if (busy) "Vérification…" else "Enregistrer") } },
+        dismissButton = { TextButton(onClick = { if (!busy) onDismiss() }) { Text("Annuler") } },
+        title = { Text("Modifier les identifiants") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    s, { s = it }, singleLine = true, label = { Text("Serveur (http://adresse:port)") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                    keyboardActions = KeyboardActions(onNext = { focus.moveFocus(FocusDirection.Down) }),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    u, { u = it }, singleLine = true, label = { Text("Identifiant") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                    keyboardActions = KeyboardActions(onNext = { focus.moveFocus(FocusDirection.Down) }),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    p, { p = it }, singleLine = true, label = { Text("Mot de passe") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { save() }),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (msg.isNotBlank()) Text(msg, color = if (busy) MUTED else ACCENT, fontSize = 13.sp)
+            }
+        }
+    )
 }
 
 @Composable

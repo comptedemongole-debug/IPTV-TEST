@@ -110,7 +110,7 @@ object Zap {
 
 sealed class MenuEntry {
     class Header(val text: String) : MenuEntry()
-    class Row(val label: String, val sub: String, val selected: Boolean, val onPick: () -> Unit) : MenuEntry()
+    class Row(val label: String, val sub: String, val selected: Boolean, val done: Boolean = false, val onPick: () -> Unit) : MenuEntry()
 }
 
 private val MENU_BG = Color(0xEE0B0B0F)
@@ -125,15 +125,14 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var menuView: ComposeView
     private lateinit var progBtn: TextView
     private lateinit var gearBtn: TextView
-    private lateinit var introBtn: TextView          // « Passer l'intro » (séries)
     private lateinit var nextCard: LinearLayout      // carte « épisode suivant » (séries, 15 s avant la fin)
     private lateinit var nextImg: ImageView
     private lateinit var nextTitle: TextView
     private lateinit var nextCount: TextView
-    private var introDismissed = false
     private var nextDismissed = false
     private var noAutoNext = false                   // « Retour » sur la carte : pas de lecture auto pour cet épisode
     private var swallowBackUp = false
+    private var forcedPcm = false                    // vitesse ≠ 1× : le son doit être décodé (pas de passthrough)
     private var nextShownFor = -1
     private var seekStreak = 0
     private var lastSeekAt = 0L
@@ -227,6 +226,8 @@ class PlayerActivity : ComponentActivity() {
 
         view = PlayerView(this)
         view.player = p
+        // la roue crantée intégrée au lecteur (en bas à droite) fait doublon avec la nôtre (en haut à droite) : on la retire
+        try { view.findViewById<View>(androidx.media3.ui.R.id.exo_settings)?.visibility = View.GONE } catch (e: Exception) { /* ignoré */ }
         info = TextView(this)
         info.setTextColor(AColor.WHITE)
         info.textSize = 20f
@@ -315,30 +316,6 @@ class PlayerActivity : ComponentActivity() {
         lp3.setMargins(0, 48, 48, 0)
         root.addView(gearBtn, lp3)
 
-        // --- bouton « Passer l'intro » (↓ pour le sélectionner, OK pour sauter)
-        introBtn = TextView(this)
-        introBtn.text = "↓  Passer l'intro"
-        introBtn.textSize = 18f
-        introBtn.typeface = android.graphics.Typeface.DEFAULT_BOLD
-        introBtn.setTextColor(AColor.WHITE)
-        introBtn.gravity = Gravity.CENTER
-        introBtn.setPadding(dpx(26), dpx(14), dpx(26), dpx(14))
-        introBtn.isFocusable = true
-        introBtn.isFocusableInTouchMode = true
-        introBtn.isClickable = true
-        introBtn.background = overlayBg(false, 8)
-        introBtn.visibility = View.GONE
-        introBtn.setOnClickListener { skipIntro() }
-        introBtn.setOnFocusChangeListener { _, f ->
-            introBtn.background = overlayBg(f, 8)
-            introBtn.setTextColor(if (f) AColor.BLACK else AColor.WHITE)
-            introBtn.text = if (f) "Passer l'intro  ›" else "↓  Passer l'intro"
-        }
-        val lp4 = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        lp4.gravity = Gravity.BOTTOM or Gravity.END
-        lp4.setMargins(0, 0, dpx(32), dpx(120))
-        root.addView(introBtn, lp4)
-
         // --- carte « épisode suivant »
         nextCard = LinearLayout(this)
         nextCard.orientation = LinearLayout.VERTICAL
@@ -406,7 +383,7 @@ class PlayerActivity : ComponentActivity() {
         if (perf) lb.setBufferDurationsMs(15_000, 50_000, 2_000, 4_000)
         else lb.setBufferDurationsMs(30_000, 120_000, 2_500, 5_000)
         if (perf || Booster.isLowRam(this)) lb.setTargetBufferBytes(48 * 1024 * 1024)
-        val p = ExoPlayer.Builder(this, makeRenderers(this, Zap.repo?.pcmAudio == true))
+        val p = ExoPlayer.Builder(this, makeRenderers(this, Zap.repo?.pcmAudio == true || forcedPcm))
             .setLoadControl(lb.build())
             .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(http))
             .build()
@@ -466,11 +443,9 @@ class PlayerActivity : ComponentActivity() {
         curUrl = url
         baseUrl = url
         retried = false
-        introDismissed = false
         nextDismissed = false
         noAutoNext = false
         nextShownFor = -1
-        hideIntro()
         hideNext()
         resetReliability()
         triedUrls.add(url)
@@ -733,7 +708,11 @@ class PlayerActivity : ComponentActivity() {
         if (live) return
         val p = exo ?: return
         val dur = p.duration
-        if (dur > 0) Zap.repo?.saveResume(kindX, baseUrl.ifBlank { curUrl }, titleX, imgX, p.currentPosition, dur)
+        if (dur > 0) {
+            Zap.repo?.saveResume(kindX, baseUrl.ifBlank { curUrl }, titleX, imgX, p.currentPosition, dur)
+            // épisode de série vu (90 % ou plus) : coche verte dans la liste des épisodes
+            if (kindX == "series" && p.currentPosition >= dur * 0.9) Zap.repo?.markWatched(baseUrl.ifBlank { curUrl })
+        }
     }
 
     // ---------------------------------------------------------------- bouton et menu Prog
@@ -863,7 +842,7 @@ class PlayerActivity : ComponentActivity() {
         if (!live) {
             out.add(MenuEntry.Row("Vitesse : ${speedLabel(speeds[speedIdx])}", "OK pour changer (0,75× à 2×)", false) {
                 speedIdx = (speedIdx + 1) % speeds.size
-                p.setPlaybackSpeed(speeds[speedIdx])
+                applySpeed(speeds[speedIdx])
                 flashMsg("Vitesse : " + speedLabel(speeds[speedIdx]))
                 refreshMenu()
             })
@@ -958,32 +937,12 @@ class PlayerActivity : ComponentActivity() {
         return g
     }
 
-    private fun hideIntro() {
-        if (!::introBtn.isInitialized) return
-        if (introBtn.visibility == View.VISIBLE) {
-            if (introBtn.hasFocus()) view.requestFocus()
-            introBtn.visibility = View.GONE
-        }
-    }
-
     private fun hideNext() {
         if (!::nextCard.isInitialized) return
         if (nextCard.visibility == View.VISIBLE) {
             if (nextCard.hasFocus()) view.requestFocus()
             nextCard.visibility = View.GONE
         }
-    }
-
-    private fun skipIntro() {
-        val p = exo ?: return
-        val dur = p.duration
-        var t = p.currentPosition + 90_000L
-        if (dur > 0) t = minOf(t, dur - 1000L)
-        t = maxOf(0L, t)
-        p.seekTo(t)
-        introDismissed = true
-        hideIntro()
-        flashMsg("Intro passée   " + fmtPos(t))
     }
 
     private fun playNextNow() {
@@ -994,11 +953,10 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
-    /** Toutes les 500 ms : affiche « Passer l'intro » au début d'un épisode et la carte « épisode suivant » 15 s avant la fin. */
+    /** Toutes les 500 ms : affiche la carte « épisode suivant » 15 s avant la fin d'un épisode. */
     private fun overlayTick() {
         val p = exo
         if (p == null || live || failed || menuOpen || !episodeContext()) {
-            hideIntro()
             hideNext()
             return
         }
@@ -1006,11 +964,6 @@ class PlayerActivity : ComponentActivity() {
         val pos = p.currentPosition
         val known = dur > 60_000L
         val remaining = if (known) dur - pos else Long.MAX_VALUE
-
-        val introOn = !introDismissed && pos in 3_000L..180_000L && (!known || remaining > 20_000L)
-        if (introOn) {
-            if (introBtn.visibility != View.VISIBLE) introBtn.visibility = View.VISIBLE
-        } else hideIntro()
 
         if (known && remaining > 16_000L) nextDismissed = false
         val hasNext = Zap.epIndex + 1 < Zap.eps.size
@@ -1026,7 +979,6 @@ class PlayerActivity : ComponentActivity() {
             val sec = ((remaining + 999L) / 1000L).toInt()
             nextCount.text = if (auto && !noAutoNext) "Lecture dans $sec s  ·  OK pour lancer" else "OK pour lancer"
             if (nextCard.visibility != View.VISIBLE) {
-                hideIntro()
                 nextCard.visibility = View.VISIBLE
                 nextCard.requestFocus()
             }
@@ -1056,6 +1008,35 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Change la vitesse de lecture. Sur beaucoup de TV (TCL…), un son AC3 / E-AC3 / DTS envoyé tel quel à la TV (« passthrough »)
+     * ne peut pas être accéléré : la vitesse reste à 1×. On bascule alors le lecteur en décodage PCM, en gardant la position,
+     * la piste audio et les sous-titres choisis (une brève coupure à la première fois seulement).
+     */
+    private fun applySpeed(sp: Float) {
+        var p = exo ?: return
+        if (sp != 1f && !live && !forcedPcm && Zap.repo?.pcmAudio != true && p !== Preview.player) {
+            val item = p.currentMediaItem
+            if (item != null) {
+                forcedPcm = true
+                val pos = p.currentPosition
+                val playing = p.playWhenReady
+                val np = buildPlayer()
+                np.trackSelectionParameters = p.trackSelectionParameters
+                view.player = np
+                exo = np
+                try { p.release() } catch (e: Exception) { /* ignoré */ }
+                bufSince = 0L
+                readySince = 0L
+                np.setMediaItem(item, pos)
+                np.prepare()
+                np.playWhenReady = playing
+                p = np
+            }
+        }
+        p.setPlaybackSpeed(sp)
+    }
+
     private fun buildSettings(): List<MenuEntry> {
         val out = ArrayList<MenuEntry>()
         out.addAll(playbackEntries())
@@ -1076,7 +1057,9 @@ class PlayerActivity : ComponentActivity() {
         } else if (episodeContext()) {
             val shown = menuSeason.ifBlank { Zap.eps.getOrNull(Zap.epIndex)?.season ?: Zap.eps.first().season }
             Zap.eps.forEachIndexed { i, e ->
-                if (e.season == shown) out.add(MenuEntry.Row(e.label, "", i == Zap.epIndex) { playEpisode(i); closeMenu() })
+                if (e.season == shown) out.add(
+                    MenuEntry.Row(e.label, "", i == Zap.epIndex, done = Zap.repo?.isWatched(e.url) == true) { playEpisode(i); closeMenu() }
+                )
             }
         } else {
             if (vodContext()) {
@@ -1119,7 +1102,6 @@ class PlayerActivity : ComponentActivity() {
         }
         if (settings) menuSub = "Réglages du lecteur"
         menuOpen = true
-        hideIntro()
         hideNext()
         progBtn.visibility = View.GONE
         gearBtn.visibility = View.GONE
@@ -1169,19 +1151,10 @@ class PlayerActivity : ComponentActivity() {
                 flashMsg("Lecture automatique annulée pour cet épisode")
                 return true
             }
-            // ↑ / ↓ depuis le bouton « Passer l'intro » ou la carte « épisode suivant » : on réveille le lecteur
-            if ((k == KeyEvent.KEYCODE_DPAD_UP || k == KeyEvent.KEYCODE_DPAD_DOWN) && !menuOpen &&
-                (introBtn.hasFocus() || nextCard.hasFocus())
-            ) {
+            // ↑ / ↓ depuis la carte « épisode suivant » : on réveille le lecteur
+            if ((k == KeyEvent.KEYCODE_DPAD_UP || k == KeyEvent.KEYCODE_DPAD_DOWN) && !menuOpen && nextCard.hasFocus()) {
                 view.requestFocus()
                 view.showController()
-                return true
-            }
-            // ↓ : sélectionne le bouton « Passer l'intro » (OK pour sauter)
-            if (k == KeyEvent.KEYCODE_DPAD_DOWN && !menuOpen && !live && !failed && !view.isControllerFullyVisible &&
-                introBtn.visibility == View.VISIBLE && !introBtn.hasFocus()
-            ) {
-                introBtn.requestFocus()
                 return true
             }
             // Films / séries : ← −10 s, → +10 s (puis 30 s, 60 s si on enchaîne), sans afficher les commandes
@@ -1376,10 +1349,13 @@ fun MenuRow(e: MenuEntry.Row, modifier: Modifier) {
             .clickable(onClick = e.onPick)
             .padding(horizontal = 20.dp, vertical = 10.dp)
     ) {
-        Text(
-            (if (e.selected) "▶  " else "") + e.label, fontSize = 15.sp,
-            color = if (e.selected) MENU_ACCENT else Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis
-        )
+        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            if (e.done) Text("✓  ", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color(0xFF3DD68C))
+            Text(
+                (if (e.selected) "▶  " else "") + e.label, fontSize = 15.sp,
+                color = if (e.selected) MENU_ACCENT else Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+        }
         if (e.sub.isNotBlank()) {
             Text(e.sub, fontSize = 12.sp, color = Color(0xFFC9C9D2), maxLines = 1, overflow = TextOverflow.Ellipsis)
         }

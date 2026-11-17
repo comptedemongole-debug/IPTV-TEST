@@ -86,3 +86,19 @@ reglages de mise a jour (chaque jour / 3 jours / semaine / mois) pour le contenu
   Définition plafonnée (720p pour 2 fenêtres, 540p pour 4), tampons courts, un seul son décodé.
 - Performances : build « release » (non debug, profils de démarrage Compose actifs), affiches en RGB565 (moitié moins de mémoire).
   Le fichier publié garde le nom app-debug.apk : ton lien Downloader ne change pas. Si le build release échoue, le workflow retombe sur le debug.
+
+=== Version 3.5.1 ===
+- Vitesse (films / séries) réparée sur les TV où le son part en « passthrough » (AC3 / E-AC3 / DTS) : au 1er changement de vitesse, le lecteur bascule en décodage du son (position, piste audio et sous-titres conservés).
+- Lecteur : la roue crantée intégrée en bas à droite est retirée (celle du haut à droite suffit). Le bouton « Passer l'intro » est supprimé (la ligne « Passer l'intro (+90 s) » reste dans la roue ⚙).
+- Séries : coche verte ✓ à côté des épisodes vus (90 % ou plus), dans la fiche de la série et dans le menu Prog. Les épisodes vus avant cette version n'ont pas de coche.
+- Réglages > Compte IPTV > « Modifier les identifiants » : change serveur / identifiant / mot de passe sans déconnexion, après vérification. Catégories, masqués, favoris, playlists, reprises et coches sont conservés.
+
+=== Version 3.5.2 ===
+- Réglages > « Mise à jour de l'appli » : « Rechercher une mise à jour » lit la dernière release de ton GitHub, puis « Télécharger et installer » lance l'installation, sans Downloader.
+  Le workflow écrit le nom de ton dépôt dans l'appli (assets/update_repo.txt) et le versionCode dans la release : rien à configurer. Le dépôt doit être public.
+  La toute première installation de la 3.5.2 se fait comme d'habitude (Downloader) ; les suivantes peuvent se faire depuis l'appli.
+  Au premier lancement, Android demande d'autoriser Kinéo à installer des applications.
+
+=== Version 3.5.3 ===
+- Clé TMDB par défaut : crée un secret GitHub nommé TMDB_KEY (dépôt > Settings > Secrets and variables > Actions > New repository secret). Le workflow l'écrit dans l'appli à chaque build, sans qu'elle apparaisse dans le code public.
+  Une clé saisie dans Réglages sur la TV reste prioritaire.
